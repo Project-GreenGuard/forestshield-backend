@@ -5,6 +5,7 @@ AWS Lambda functions and backend services for processing wildfire sensor data.
 ## Overview
 
 This repository contains:
+
 - Lambda function for processing IoT sensor data
 - Lambda function for API Gateway endpoints
 - Local development environment with Docker
@@ -22,17 +23,20 @@ API Gateway → Lambda (api_handler) ← Frontend Dashboard
 ### Lambda Functions
 
 #### 1. Process Sensor Data (`lambda-processing/`)
+
 - Receives MQTT messages from AWS IoT Core
 - Fetches NASA FIRMS wildfire data
 - Calculates risk score
 - Stores enriched data in DynamoDB
 
 #### 2. API Handler (`api-gateway-lambda/`)
+
 - Handles API Gateway requests
 - Queries DynamoDB
 - Returns sensor and risk map data
 
 **Endpoints:**
+
 - `GET /api/sensors` - List all sensors
 - `GET /api/sensor/{id}` - Get sensor by ID
 - `GET /api/risk-map` - Get risk map data
@@ -40,8 +44,19 @@ API Gateway → Lambda (api_handler) ← Frontend Dashboard
 ## Local Development
 
 ### Prerequisites
+
 - Docker & Docker Compose
 - Python 3.11+
+
+### Environment Configuration
+
+Copy the environment template:
+
+```bash
+cp .env.example .env
+```
+
+The default values work for local development. No changes needed unless customizing ports or region.
 
 ### Start Local Services
 
@@ -50,6 +65,7 @@ docker-compose up -d
 ```
 
 This starts:
+
 - **API Server** (port 5001) - Local Flask server
 - **DynamoDB Local** (port 8000)
 - **Mosquitto MQTT** (ports 1883, 9001)
@@ -105,16 +121,27 @@ Then move zip files to `forestshield-infrastructure/` before running Terraform.
 
 ## Environment Variables
 
-For local development:
+Copy `.env.example` to `.env` for local development:
+
+```bash
+cp .env.example .env
+```
+
+**Local development variables:**
+
 - `AWS_ENDPOINT_URL=http://dynamodb:8000` (DynamoDB Local)
 - `AWS_ACCESS_KEY_ID=local`
 - `AWS_SECRET_ACCESS_KEY=local`
+- `AWS_REGION=us-east-1`
 
-For AWS deployment, set via Terraform in `forestshield-infrastructure`.
+**For AWS deployment:** Environment variables are set via Terraform in `forestshield-infrastructure`. Lambda functions use IAM roles for authentication.
+
+See `TEAM_SETUP_GUIDE.md` in the `/docs` folder for detailed configuration instructions.
 
 ## Dependencies
 
 See `requirements.txt` in each Lambda directory:
+
 - `boto3` - AWS SDK
 - `requests` - HTTP client (for NASA FIRMS API)
 

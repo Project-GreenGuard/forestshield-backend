@@ -4,11 +4,13 @@ services:
     build: .
     ports:
       - "5001:5000"
+    env_file:
+      - .env
     environment:
-      - FLASK_ENV=development
-      - AWS_ENDPOINT_URL=http://dynamodb:8000
-      - AWS_ACCESS_KEY_ID=local
-      - AWS_SECRET_ACCESS_KEY=local
+      - FLASK_ENV=${FLASK_ENV:-development}
+      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://dynamodb:8000}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-local}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-local}
     volumes:
       - ./api-gateway-lambda:/app
     depends_on:
