@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   # Local API server (simulates API Gateway + Lambda)
   api:
     build: .
     ports:
-      - "5000:5000"
+      - "5001:5000"
     environment:
       - FLASK_ENV=development
       - AWS_ENDPOINT_URL=http://dynamodb:8000

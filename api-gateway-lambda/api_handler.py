@@ -9,10 +9,25 @@ Endpoints:
 
 import json
 import boto3
+import os
 from boto3.dynamodb.conditions import Key
 from datetime import datetime, timedelta
 
-dynamodb = boto3.resource('dynamodb')
+# Support both local and AWS DynamoDB
+dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
+if dynamodb_endpoint:
+    # Local development
+    dynamodb = boto3.resource(
+        'dynamodb',
+        endpoint_url=dynamodb_endpoint,
+        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'local'),
+        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'local'),
+        region_name='us-east-1'
+    )
+else:
+    # AWS production
+    dynamodb = boto3.resource('dynamodb')
+
 table = dynamodb.Table('WildfireSensorData')
 
 
@@ -37,6 +52,7 @@ def get_all_sensors():
                     'lat': item.get('lat'),
                     'lng': item.get('lng'),
                     'riskScore': item.get('riskScore'),
+                    'nearestFireDistance': item.get('nearestFireDistance'),
                     'timestamp': timestamp
                 }
         
@@ -86,6 +102,7 @@ def get_risk_map_data():
                 'riskScore': item.get('riskScore'),
                 'temperature': item.get('temperature'),
                 'humidity': item.get('humidity'),
+                'nearestFireDistance': item.get('nearestFireDistance'),
                 'timestamp': item.get('timestamp')
             })
         

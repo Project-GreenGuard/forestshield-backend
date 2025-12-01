@@ -1,131 +1,63 @@
-from flask import Flask, request, jsonify, render_template_string
+"""
+Local Flask server for development.
+Simulates API Gateway + Lambda for local frontend development.
+"""
+
+from flask import Flask, request, jsonify
 from flask_cors import CORS
+import os
+import boto3
+from boto3.dynamodb.conditions import Key
+
+# Import API handler functions
+from api_handler import get_all_sensors, get_sensor_by_id, get_risk_map_data
 
 app = Flask(__name__)
 CORS(app)
 
-latest_data = {
-    'temperature': None,
-    'sensor_id': None,
-    'location': None
-}
+# Configure DynamoDB client for local development
+dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL', 'http://dynamodb:8000')
+dynamodb = boto3.resource(
+    'dynamodb',
+    endpoint_url=dynamodb_endpoint,
+    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'local'),
+    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'local'),
+    region_name='us-east-1'
+)
 
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Temperature Dashboard</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: black;
-            color: white;
-            font-family: Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-        }
-        .sensor-info {
-            font-size: 30px;
-            color: #888;
-            margin-bottom: 20px;
-        }
-        .temperature {
-            font-size: 120px;
-            font-weight: bold;
-            color: #00ff00;
-        }
-        .temperature.high {
-            color: #ff0000;
-        }
-        .location {
-            font-size: 40px;
-            color: #888;
-            margin-top: 20px;
-        }
-        .fire-warning {
-            display: none;
-            background-color: #ff0000;
-            color: white;
-            padding: 30px 60px;
-            font-size: 50px;
-            font-weight: bold;
-            border-radius: 10px;
-            margin-top: 40px;
-            animation: blink 1s infinite;
-            text-align: center;
-        }
-        .fire-warning.show {
-            display: block;
-        }
-        @keyframes blink {
-            0%, 50%, 100% { opacity: 1; }
-            25%, 75% { opacity: 0.5; }
-        }
-    </style>
-    <script>
-        function updateTemp() {
-            fetch('/api/temperature')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.temperature !== null) {
-                        document.getElementById('temp').textContent = data.temperature + '°C';
-                        
-                        // Check for fire warning
-                        const tempElement = document.getElementById('temp');
-                        const warningElement = document.getElementById('fire-warning');
-                        
-                        if (data.temperature > 35) {
-                            tempElement.classList.add('high');
-                            warningElement.classList.add('show');
-                        } else {
-                            tempElement.classList.remove('high');
-                            warningElement.classList.remove('show');
-                        }
-                    }
-                    if (data.sensor_id !== null) {
-                        document.getElementById('sensor').textContent = 'Sensor: ' + data.sensor_id;
-                    }
-                    if (data.location !== null) {
-                        document.getElementById('location').textContent = 'Location: ' + data.location;
-                    }
-                });
-        }
-        setInterval(updateTemp, 2000);
-        updateTemp();
-    </script>
-</head>
-<body>
-    <div class="sensor-info" id="sensor">Sensor: --</div>
-    <div class="temperature" id="temp">--°C</div>
-    <div class="location" id="location">Location: --</div>
-    <div class="fire-warning" id="fire-warning">⚠️ FIRE WARNING ⚠️<br>High Temperature Detected!</div>
-</body>
-</html>
-"""
+# The api_handler will use the environment variables we set above
 
-@app.route('/')
-def dashboard():
-    return render_template_string(DASHBOARD_HTML)
+@app.route('/api/sensors', methods=['GET'])
+def api_sensors():
+    """Get all sensors endpoint"""
+    sensors = get_all_sensors()
+    return jsonify(sensors)
 
-@app.route('/api/temperature', methods=['POST'])
-def receive_temperature():
-    global latest_data
-    data = request.get_json()
-    latest_data['temperature'] = data.get('temperature')
-    latest_data['sensor_id'] = data.get('sensor_id', 'Unknown')
-    latest_data['location'] = data.get('location', 'Unknown')
-    
-    print(f"Received from {latest_data['sensor_id']} ({latest_data['location']}): {latest_data['temperature']}°C")
-    return jsonify({'success': True})
+@app.route('/api/sensor/<device_id>', methods=['GET'])
+def api_sensor(device_id):
+    """Get sensor by ID endpoint"""
+    sensor = get_sensor_by_id(device_id)
+    if sensor:
+        return jsonify(sensor)
+    else:
+        return jsonify({'error': 'Sensor not found'}), 404
 
-@app.route('/api/temperature', methods=['GET'])
-def get_temperature():
-    return jsonify(latest_data)
+@app.route('/api/risk-map', methods=['GET'])
+def api_risk_map():
+    """Get risk map data endpoint"""
+    map_data = get_risk_map_data()
+    return jsonify(map_data)
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'ok', 'service': 'forestshield-api'})
 
 if __name__ == '__main__':
-    print("Dashboard running at http://192.168.2.164:5000")
-    app.run(host='192.168.2.164', port=5000)
+    print("Local API server starting...")
+    print("API available at http://localhost:5000/api")
+    print("Endpoints:")
+    print("  GET /api/sensors")
+    print("  GET /api/sensor/<id>")
+    print("  GET /api/risk-map")
+    app.run(host='0.0.0.0', port=5000, debug=True)
