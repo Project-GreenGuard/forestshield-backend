@@ -50,13 +50,13 @@ docker-compose up -d
 ```
 
 This starts:
-- **API Server** (port 5000) - Local Flask server
+- **API Server** (port 5001) - Local Flask server
 - **DynamoDB Local** (port 8000)
 - **Mosquitto MQTT** (ports 1883, 9001)
 
 ### Access Services
 
-- API: http://localhost:5000
+- API: http://localhost:5001
 - DynamoDB Local: http://localhost:8000
 - MQTT: mqtt://localhost:1883
 
@@ -78,13 +78,13 @@ docker-compose down
 
 ```bash
 # Get all sensors
-curl http://localhost:5000/api/sensors
+curl http://localhost:5001/api/sensors
 
 # Get specific sensor
-curl http://localhost:5000/api/sensor/esp32-01
+curl http://localhost:5001/api/sensor/esp32-01
 
 # Get risk map data
-curl http://localhost:5000/api/risk-map
+curl http://localhost:5001/api/risk-map
 ```
 
 ## Deployment
