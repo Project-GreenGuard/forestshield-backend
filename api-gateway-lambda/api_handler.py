@@ -116,13 +116,19 @@ def lambda_handler(event, context):
     """API Gateway Lambda handler."""
     try:
         http_method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method')
-        path = event.get('path') or event.get('requestContext', {}).get('path')
+        path = event.get('path') or event.get('requestContext', {}).get('path') or event.get('rawPath', '')
+        
+        # Normalize path - API Gateway may send /api/sensors or /sensors depending on resource structure
+        # Handle both formats for compatibility
+        normalized_path = path
+        if not path.startswith('/api'):
+            normalized_path = f'/api{path}' if path.startswith('/') else f'/api/{path}'
         
         # Parse path parameters
         path_params = event.get('pathParameters') or {}
         
         # Route requests
-        if path == '/api/sensors' and http_method == 'GET':
+        if (path == '/api/sensors' or normalized_path == '/api/sensors' or path == '/sensors') and http_method == 'GET':
             sensors = get_all_sensors()
             return {
                 'statusCode': 200,
@@ -133,7 +139,7 @@ def lambda_handler(event, context):
                 'body': json.dumps(sensors)
             }
         
-        elif path.startswith('/api/sensor/') and http_method == 'GET':
+        elif (path.startswith('/api/sensor/') or normalized_path.startswith('/api/sensor/') or path.startswith('/sensors/')) and http_method == 'GET':
             device_id = path_params.get('id') or path.split('/')[-1]
             sensor = get_sensor_by_id(device_id)
             
@@ -156,7 +162,7 @@ def lambda_handler(event, context):
                     'body': json.dumps({'error': 'Sensor not found'})
                 }
         
-        elif path == '/api/risk-map' and http_method == 'GET':
+        elif (path == '/api/risk-map' or normalized_path == '/api/risk-map' or path == '/risk-map') and http_method == 'GET':
             map_data = get_risk_map_data()
             return {
                 'statusCode': 200,
