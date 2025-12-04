@@ -120,38 +120,62 @@ def lambda_handler(event, context):
         
         # Normalize path - API Gateway may send /api/sensors or /sensors depending on resource structure
         # Handle both formats for compatibility
+        if not path:
+            path = '/'
         normalized_path = path
-        if not path.startswith('/api'):
+        if path and not path.startswith('/api'):
             normalized_path = f'/api{path}' if path.startswith('/') else f'/api/{path}'
         
         # Parse path parameters
         path_params = event.get('pathParameters') or {}
         
-        # Route requests
-        if (path == '/api/sensors' or normalized_path == '/api/sensors' or path == '/sensors') and http_method == 'GET':
-            sensors = get_all_sensors()
-            return {
-                'statusCode': 200,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps(sensors)
-            }
-        
-        elif (path.startswith('/api/sensor/') or normalized_path.startswith('/api/sensor/') or path.startswith('/sensors/')) and http_method == 'GET':
-            device_id = path_params.get('id') or path.split('/')[-1]
-            sensor = get_sensor_by_id(device_id)
-            
-            if sensor:
+        # Route requests - check both original path and normalized path
+        if http_method == 'GET':
+            if path == '/api/sensors' or normalized_path == '/api/sensors' or path == '/sensors':
+                sensors = get_all_sensors()
                 return {
                     'statusCode': 200,
                     'headers': {
                         'Content-Type': 'application/json',
                         'Access-Control-Allow-Origin': '*'
                     },
-                    'body': json.dumps(sensor)
+                    'body': json.dumps(sensors)
                 }
+            
+            elif path.startswith('/api/sensor/') or normalized_path.startswith('/api/sensor/') or path.startswith('/sensors/'):
+                device_id = path_params.get('id') or path.split('/')[-1]
+                sensor = get_sensor_by_id(device_id)
+                
+                if sensor:
+                    return {
+                        'statusCode': 200,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps(sensor)
+                    }
+                else:
+                    return {
+                        'statusCode': 404,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Sensor not found'})
+                    }
+            
+            elif path == '/api/risk-map' or normalized_path == '/api/risk-map' or path == '/risk-map':
+                map_data = get_risk_map_data()
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps(map_data)
+                }
+            
             else:
                 return {
                     'statusCode': 404,
@@ -159,28 +183,16 @@ def lambda_handler(event, context):
                         'Content-Type': 'application/json',
                         'Access-Control-Allow-Origin': '*'
                     },
-                    'body': json.dumps({'error': 'Sensor not found'})
+                    'body': json.dumps({'error': 'Not found', 'path': path, 'method': http_method})
                 }
-        
-        elif (path == '/api/risk-map' or normalized_path == '/api/risk-map' or path == '/risk-map') and http_method == 'GET':
-            map_data = get_risk_map_data()
-            return {
-                'statusCode': 200,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps(map_data)
-            }
-        
         else:
             return {
-                'statusCode': 404,
+                'statusCode': 405,
                 'headers': {
                     'Content-Type': 'application/json',
                     'Access-Control-Allow-Origin': '*'
                 },
-                'body': json.dumps({'error': 'Not found'})
+                'body': json.dumps({'error': 'Method not allowed'})
             }
             
     except Exception as e:
