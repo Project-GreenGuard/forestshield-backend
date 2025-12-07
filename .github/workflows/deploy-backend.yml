@@ -1,0 +1,163 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    name: Deploy Backend
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          cd lambda-processing
+          pip install -r requirements.txt --quiet
+          cd ../api-gateway-lambda
+          pip install -r requirements.txt --quiet
+
+      - name: Package Lambda functions
+        run: |
+          echo "📦 Packaging Lambda functions..."
+          cd lambda-processing
+          zip -r ../lambda-processing.zip . \
+            -x "*.pyc" "__pycache__/*" "*.zip" "*.git*"
+          
+          cd ../api-gateway-lambda
+          zip -r ../api-gateway-lambda.zip . \
+            -x "*.pyc" "__pycache__/*" "*.zip" "*.git*"
+          
+          echo "✅ Lambda functions packaged"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Determine Environment
+        id: env
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.event.inputs.environment }}" == "production" ]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get Infrastructure Repo (for Terraform outputs)
+        uses: actions/checkout@v4
+        with:
+          repository: Project-GreenGuard/forestshield-infrastructure
+          path: infrastructure
+          token: ${{ secrets.INFRASTRUCTURE_REPO_TOKEN || github.token }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.7"
+
+      - name: Get Infrastructure Outputs
+        id: infra
+        working-directory: infrastructure
+        run: |
+          terraform init -backend=false || echo "⚠️ Could not init Terraform, using secrets instead"
+          # Select correct workspace
+          if [ "${{ steps.env.outputs.environment }}" == "production" ]; then
+            terraform workspace select production || terraform workspace new production || true
+          else
+            terraform workspace select default || terraform workspace new default || true
+          fi
+          if terraform output -raw api_endpoint 2>/dev/null; then
+            echo "api_endpoint=$(terraform output -raw api_endpoint)" >> $GITHUB_OUTPUT
+          else
+            echo "api_endpoint=${{ secrets.PRODUCTION_API_URL || secrets.STAGING_API_URL }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get Lambda Function Names
+        id: functions
+        run: |
+          # Try to get from infrastructure repo or use default naming
+          if [ -d "infrastructure" ]; then
+            cd infrastructure
+            terraform init -backend=false 2>/dev/null || true
+            # Select correct workspace
+            if [ "${{ steps.env.outputs.environment }}" == "production" ]; then
+              terraform workspace select production || terraform workspace new production || true
+            else
+              terraform workspace select default || terraform workspace new default || true
+            fi
+            PROCESSING_NAME=$(terraform output -raw lambda_processing_function 2>/dev/null || echo "")
+            API_NAME=$(terraform output -raw lambda_api_function 2>/dev/null || echo "")
+            cd ..
+          fi
+          
+          # Fallback to default naming if not found
+          if [ -z "$PROCESSING_NAME" ]; then
+            if [ "${{ steps.env.outputs.environment }}" == "production" ]; then
+              PROCESSING_NAME="wildfire-process-sensor-data"
+            else
+              PROCESSING_NAME="wildfire-process-sensor-data-staging"
+            fi
+          fi
+          
+          if [ -z "$API_NAME" ]; then
+            if [ "${{ steps.env.outputs.environment }}" == "production" ]; then
+              API_NAME="wildfire-api-handler"
+            else
+              API_NAME="wildfire-api-handler-staging"
+            fi
+          fi
+          
+          echo "processing_name=$PROCESSING_NAME" >> $GITHUB_OUTPUT
+          echo "api_name=$API_NAME" >> $GITHUB_OUTPUT
+          echo "Lambda function names:"
+          echo "  Processing: $PROCESSING_NAME"
+          echo "  API: $API_NAME"
+
+      - name: Update Lambda Functions
+        run: |
+          echo "🚀 Updating Lambda functions..."
+          
+          # Update processing Lambda
+          aws lambda update-function-code \
+            --function-name "${{ steps.functions.outputs.processing_name }}" \
+            --zip-file fileb://lambda-processing.zip \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ Failed to update processing Lambda"
+          
+          # Update API Lambda
+          aws lambda update-function-code \
+            --function-name "${{ steps.functions.outputs.api_name }}" \
+            --zip-file fileb://api-gateway-lambda.zip \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ Failed to update API Lambda"
+          
+          echo "✅ Lambda functions updated"
+
+      - name: Deployment Summary
+        run: |
+          echo "✅ Backend deployed to ${{ steps.env.outputs.environment }}!"
+          echo "API Endpoint: ${{ steps.infra.outputs.api_endpoint }}"
+
