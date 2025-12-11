@@ -14,6 +14,23 @@ ENV/
 lambda-processing.zip
 api-gateway-lambda.zip
 
+# Python dependencies (installed locally, not committed)
+**/boto3/
+**/botocore/
+**/site-packages/
+**/bin/
+**/*.dist-info/
+**/dateutil/
+**/jmespath/
+**/s3transfer/
+**/urllib3/
+**/certifi/
+**/charset_normalizer/
+**/idna/
+**/requests/
+**/six.py
+**/python_dateutil*/
+
 # Docker
 .dockerignore
 

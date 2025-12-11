@@ -42,9 +42,22 @@ def decimal_default(obj):
 def get_all_sensors():
     """Get all unique sensors with their latest data."""
     try:
-        # Scan table to get all devices
-        response = table.scan()
-        items = response.get('Items', [])
+        # Scan table with pagination to get all devices
+        items = []
+        last_evaluated_key = None
+        
+        while True:
+            if last_evaluated_key:
+                response = table.scan(ExclusiveStartKey=last_evaluated_key)
+            else:
+                response = table.scan()
+            
+            items.extend(response.get('Items', []))
+            
+            # Check if there are more items to scan
+            last_evaluated_key = response.get('LastEvaluatedKey')
+            if not last_evaluated_key:
+                break
         
         # Group by deviceId and get latest for each
         sensors = {}
@@ -52,6 +65,7 @@ def get_all_sensors():
             device_id = item['deviceId']
             timestamp = item['timestamp']
             
+            # Compare timestamps (ISO format strings compare correctly)
             if device_id not in sensors or timestamp > sensors[device_id]['timestamp']:
                 sensors[device_id] = {
                     'deviceId': device_id,
@@ -67,6 +81,8 @@ def get_all_sensors():
         return list(sensors.values())
     except Exception as e:
         print(f"Error getting sensors: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
