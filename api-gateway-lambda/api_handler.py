@@ -12,6 +12,7 @@ import boto3
 import os
 from boto3.dynamodb.conditions import Key
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 # Support both local and AWS DynamoDB
 dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
@@ -31,6 +32,13 @@ else:
 table = dynamodb.Table('WildfireSensorData')
 
 
+def decimal_default(obj):
+    """Convert Decimal to float for JSON serialization."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    raise TypeError
+
+
 def get_all_sensors():
     """Get all unique sensors with their latest data."""
     try:
@@ -47,12 +55,12 @@ def get_all_sensors():
             if device_id not in sensors or timestamp > sensors[device_id]['timestamp']:
                 sensors[device_id] = {
                     'deviceId': device_id,
-                    'temperature': item.get('temperature'),
-                    'humidity': item.get('humidity'),
-                    'lat': item.get('lat'),
-                    'lng': item.get('lng'),
-                    'riskScore': item.get('riskScore'),
-                    'nearestFireDistance': item.get('nearestFireDistance'),
+                    'temperature': float(item.get('temperature', 0)) if isinstance(item.get('temperature'), Decimal) else item.get('temperature'),
+                    'humidity': float(item.get('humidity', 0)) if isinstance(item.get('humidity'), Decimal) else item.get('humidity'),
+                    'lat': float(item.get('lat', 0)) if isinstance(item.get('lat'), Decimal) else item.get('lat'),
+                    'lng': float(item.get('lng', 0)) if isinstance(item.get('lng'), Decimal) else item.get('lng'),
+                    'riskScore': float(item.get('riskScore', 0)) if isinstance(item.get('riskScore'), Decimal) else item.get('riskScore'),
+                    'nearestFireDistance': float(item.get('nearestFireDistance', -1)) if isinstance(item.get('nearestFireDistance'), Decimal) else item.get('nearestFireDistance'),
                     'timestamp': timestamp
                 }
         
@@ -73,7 +81,15 @@ def get_sensor_by_id(device_id: str):
         
         items = response.get('Items', [])
         if items:
-            return items[0]
+            item = items[0]
+            # Convert Decimal to float for JSON serialization
+            result = {}
+            for key, value in item.items():
+                if isinstance(value, Decimal):
+                    result[key] = float(value)
+                else:
+                    result[key] = value
+            return result
         return None
     except Exception as e:
         print(f"Error getting sensor {device_id}: {e}")
@@ -115,8 +131,13 @@ def get_risk_map_data():
 def lambda_handler(event, context):
     """API Gateway Lambda handler."""
     try:
+        # Debug: Log the event structure
+        print(f"Received event: {json.dumps(event)}")
+        
         http_method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method')
         path = event.get('path') or event.get('requestContext', {}).get('path') or event.get('rawPath', '')
+        
+        print(f"Parsed - Method: {http_method}, Path: {path}")
         
         # Normalize path - API Gateway may send /api/sensors or /sensors depending on resource structure
         # Handle both formats for compatibility
@@ -139,7 +160,7 @@ def lambda_handler(event, context):
                         'Content-Type': 'application/json',
                         'Access-Control-Allow-Origin': '*'
                     },
-                    'body': json.dumps(sensors)
+                    'body': json.dumps(sensors, default=decimal_default)
                 }
             
             elif path.startswith('/api/sensor/') or normalized_path.startswith('/api/sensor/') or path.startswith('/sensors/'):
@@ -153,7 +174,7 @@ def lambda_handler(event, context):
                             'Content-Type': 'application/json',
                             'Access-Control-Allow-Origin': '*'
                         },
-                        'body': json.dumps(sensor)
+                        'body': json.dumps(sensor, default=decimal_default)
                     }
                 else:
                     return {
@@ -173,7 +194,7 @@ def lambda_handler(event, context):
                         'Content-Type': 'application/json',
                         'Access-Control-Allow-Origin': '*'
                     },
-                    'body': json.dumps(map_data)
+                    'body': json.dumps(map_data, default=decimal_default)
                 }
             
             else:

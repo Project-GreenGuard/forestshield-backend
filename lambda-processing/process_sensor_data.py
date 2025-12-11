@@ -10,12 +10,27 @@ This function:
 
 import json
 import boto3
+import os
 import requests
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, Any
 
-# Initialize AWS clients
-dynamodb = boto3.resource('dynamodb')
+# Initialize AWS clients - support both local and AWS DynamoDB
+dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
+if dynamodb_endpoint:
+    # Local development
+    dynamodb = boto3.resource(
+        'dynamodb',
+        endpoint_url=dynamodb_endpoint,
+        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'local'),
+        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'local'),
+        region_name='us-east-1'
+    )
+else:
+    # AWS production
+    dynamodb = boto3.resource('dynamodb')
+
 table = dynamodb.Table('WildfireSensorData')
 
 # NASA FIRMS API endpoint
@@ -140,12 +155,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     }
     """
     try:
-        # Parse IoT payload
+        # Parse IoT payload - IoT Core SQL SELECT * returns the message payload directly
         if 'deviceId' in event:
             payload = event
+        elif 'temperature' in event:
+            # IoT Core may send the payload directly
+            payload = event
+        elif 'body' in event:
+            # Wrapped in body (unlikely for IoT Core, but handle it)
+            payload = json.loads(event['body'])
         else:
-            # IoT Core may wrap the payload
-            payload = json.loads(event.get('body', json.dumps(event)))
+            # Default: use event as payload
+            payload = event
         
         device_id = payload.get('deviceId')
         temperature = float(payload.get('temperature', 0))
@@ -153,6 +174,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         lat = float(payload.get('lat', 0))
         lng = float(payload.get('lng', 0))
         timestamp = payload.get('timestamp', datetime.utcnow().isoformat() + 'Z')
+        
+        # Validate required fields
+        if not device_id:
+            print(f"ERROR: deviceId is missing from payload: {payload}")
+            return {'statusCode': 400, 'body': json.dumps({'error': 'deviceId is required'})}
         
         # Fetch NASA FIRMS wildfire data
         fires = fetch_nasa_firms_data("CAN")  # Canada for now, can be parameterized
@@ -164,16 +190,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Calculate risk score
         risk_score = calculate_risk_score(temperature, humidity, fire_distance)
         
-        # Prepare DynamoDB item
+        # Prepare DynamoDB item (convert floats to Decimals for DynamoDB compatibility)
         dynamodb_item = {
             'deviceId': device_id,
             'timestamp': timestamp,
-            'temperature': temperature,
-            'humidity': humidity,
-            'lat': lat,
-            'lng': lng,
-            'riskScore': risk_score,
-            'nearestFireDistance': fire_distance if fire_distance else -1,
+            'temperature': Decimal(str(temperature)),
+            'humidity': Decimal(str(humidity)),
+            'lat': Decimal(str(lat)),
+            'lng': Decimal(str(lng)),
+            'riskScore': Decimal(str(risk_score)),
+            'nearestFireDistance': Decimal(str(fire_distance)) if fire_distance else Decimal('-1'),
             'nearestFireData': json.dumps(fire_info.get('fire_data')) if fire_info.get('fire_data') else None,
             'ttl': int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
         }
