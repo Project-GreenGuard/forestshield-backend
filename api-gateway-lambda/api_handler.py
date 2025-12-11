@@ -131,9 +131,6 @@ def get_risk_map_data():
 def lambda_handler(event, context):
     """API Gateway Lambda handler."""
     try:
-        # Debug: Log the event structure
-        print(f"Received event: {json.dumps(event)}")
-        
         http_method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method')
         path = event.get('path') or event.get('requestContext', {}).get('path') or event.get('rawPath', '')
         
