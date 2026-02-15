@@ -8,6 +8,7 @@ from flask_cors import CORS
 import os
 import boto3
 from boto3.dynamodb.conditions import Key
+from nasa_firms_service import get_nasa_fires
 
 # Import API handler functions
 from api_handler import get_all_sensors, get_sensor_by_id, get_risk_map_data
@@ -32,6 +33,15 @@ def api_sensors():
     """Get all sensors endpoint"""
     sensors = get_all_sensors()
     return jsonify(sensors)
+
+@app.route('/api/nasa-fires', methods=['GET'])
+def nasa_fires():
+    fires = get_nasa_fires()
+    return jsonify({
+        "source": "NASA FIRMS",
+        "count": len(fires),
+        "fires": fires
+    })
 
 @app.route('/api/sensor/<device_id>', methods=['GET'])
 def api_sensor(device_id):

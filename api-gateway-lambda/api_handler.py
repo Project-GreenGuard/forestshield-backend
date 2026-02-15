@@ -13,6 +13,8 @@ import os
 from boto3.dynamodb.conditions import Key
 from datetime import datetime, timedelta
 from decimal import Decimal
+from nasa_firms_service import get_nasa_fires
+
 
 # Support both local and AWS DynamoDB
 dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
@@ -142,6 +144,19 @@ def get_risk_map_data():
     except Exception as e:
         print(f"Error getting risk map data: {e}")
         return []
+    
+def get_nasa_data(event, context):
+    fires = get_nasa_fires()
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+        "body": json.dumps({
+            "source": "NASA FIRMS",
+            "count": len(fires),
+            "fires": fires
+        }, default=decimal_default)
+    }
 
 
 def lambda_handler(event, context):
@@ -210,6 +225,10 @@ def lambda_handler(event, context):
                     'body': json.dumps(map_data, default=decimal_default)
                 }
             
+            elif path == '/api/nasa-fires' or normalized_path == '/api/nasa-fires' or path == '/nasa-fires':
+                return get_nasa_data(event, context)
+
+            
             else:
                 return {
                     'statusCode': 404,
@@ -239,4 +258,6 @@ def lambda_handler(event, context):
             },
             'body': json.dumps({'error': str(e)})
         }
+
+
 
