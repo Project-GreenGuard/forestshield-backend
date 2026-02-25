@@ -4,7 +4,7 @@ AWS Lambda function to process IoT sensor data from AWS IoT Core.
 This function:
 1. Receives MQTT messages from IoT Core
 2. Fetches NASA FIRMS wildfire data
-3. Computes risk score
+3. Computes ML-based risk score
 4. Stores enriched data in DynamoDB
 """
 
@@ -15,6 +15,10 @@ import requests
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any
+import joblib
+import numpy as np
+import pandas as pd
+import tempfile
 
 # Initialize AWS clients - support both local and AWS DynamoDB
 dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
@@ -36,6 +40,88 @@ table = dynamodb.Table('WildfireSensorData')
 # NASA FIRMS API endpoint
 NASA_FIRMS_API = "https://firms.modaps.eosdis.nasa.gov/api/country/csv/{}/MODIS_NRT/1"
 
+# ML Model - will be loaded from S3 in production
+ml_model = None
+model_loaded = False
+
+# Feature columns expected by the ML model
+FEATURE_COLUMNS = [
+    'temperature', 'humidity', 'wind_speed', 
+    'wind_direction', 'pressure', 'vegetation_index'
+]
+
+def load_ml_model():
+    """Load the trained ML model from S3 or local file"""
+    global ml_model, model_loaded
+    
+    try:
+        # In production, you'd load from S3
+        # s3 = boto3.client('s3')
+        # s3.download_file('your-bucket', 'models/ml_model.joblib', '/tmp/ml_model.joblib')
+        # ml_model = joblib.load('/tmp/ml_model.joblib')
+        
+        # For local development, load from current directory
+        model_path = os.path.join(os.path.dirname(__file__), 'ml_model.joblib')
+        if os.path.exists(model_path):
+            ml_model = joblib.load(model_path)
+            model_loaded = True
+            print(f"✅ ML Model loaded from {model_path}")
+        else:
+            print("⚠️ No ML model found, using fallback calculation")
+            model_loaded = False
+    except Exception as e:
+        print(f"❌ Error loading ML model: {e}")
+        model_loaded = False
+
+def calculate_vegetation_index(humidity: float, soil_moisture: float = 30) -> float:
+    """Calculate vegetation moisture index (matches training data)"""
+    return (humidity * 0.3 + soil_moisture * 0.7) / 100
+
+def calculate_risk_score_ml(temperature: float, humidity: float, wind_speed: float = 10, 
+                           wind_direction: float = 0, pressure: float = 1013) -> float:
+    """Use ML model to predict risk score"""
+    global ml_model, model_loaded
+    
+    # Load model if not loaded
+    if not model_loaded:
+        load_ml_model()
+    
+    # If model loaded, use it
+    if model_loaded and ml_model:
+        try:
+            # Calculate vegetation index
+            veg_index = calculate_vegetation_index(humidity)
+            
+            # Create feature array for prediction
+            features = pd.DataFrame([[
+                temperature, humidity, wind_speed, wind_direction, pressure, veg_index
+            ]], columns=FEATURE_COLUMNS)
+            
+            # Make prediction (returns 0-1 scale)
+            risk_score = float(ml_model.predict(features)[0])
+            risk_score = max(0, min(1, risk_score)) * 100  # Convert to 0-100 scale
+            
+            print(f"✅ ML prediction: {risk_score:.1f}/100")
+            return round(risk_score, 2)
+        except Exception as e:
+            print(f"❌ ML prediction error: {e}, falling back to rule-based")
+            return calculate_risk_score_fallback(temperature, humidity, wind_speed)
+    else:
+        # Fallback to rule-based calculation
+        return calculate_risk_score_fallback(temperature, humidity, wind_speed)
+
+def calculate_risk_score_fallback(temperature: float, humidity: float, 
+                                  wind_speed: float = 10) -> float:
+    """Fallback rule-based risk calculation when ML model unavailable"""
+    # Normalize factors (0-1 scale)
+    temp_factor = min(temperature / 40.0, 1.0)  # 40°C = max risk
+    humidity_factor = 1.0 - min(humidity / 100.0, 1.0)  # Lower humidity = higher risk
+    wind_factor = min(wind_speed / 30.0, 1.0)  # 30 km/h = max risk
+    
+    # Weighted combination (adjust weights based on importance)
+    risk_score = (temp_factor * 0.5 + humidity_factor * 0.3 + wind_factor * 0.2) * 100
+    
+    return round(risk_score, 2)
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate distance between two coordinates using Haversine formula."""
@@ -53,13 +139,13 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     
     return c * r
 
-
 def fetch_nasa_firms_data(country_code: str = "CAN") -> list:
     """
     Fetch active wildfire data from NASA FIRMS API.
     Returns list of fire points with lat/lng coordinates.
     """
     try:
+        api_key = os.getenv('NASA_MAP_KEY', '')
         url = NASA_FIRMS_API.format(country_code)
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -84,7 +170,6 @@ def fetch_nasa_firms_data(country_code: str = "CAN") -> list:
     except Exception as e:
         print(f"Error fetching NASA FIRMS data: {e}")
         return []
-
 
 def find_nearest_fire(sensor_lat: float, sensor_lng: float, fires: list) -> Dict[str, Any]:
     """Find the nearest fire to the sensor location."""
@@ -111,35 +196,6 @@ def find_nearest_fire(sensor_lat: float, sensor_lng: float, fires: list) -> Dict
         "fire_data": nearest_fire
     }
 
-
-def calculate_risk_score(temperature: float, humidity: float, fire_distance: float = None) -> float:
-    """
-    Simple risk scoring algorithm.
-    risk = w1*temperature + w2*(1/humidity) + w3*(1/distance_to_fire)
-    """
-    w1 = 0.4  # Temperature weight
-    w2 = 0.3  # Humidity weight
-    w3 = 0.3  # Fire proximity weight
-    
-    # Normalize temperature (0-50°C range)
-    temp_score = min(temperature / 50.0, 1.0) * 100
-    
-    # Inverse humidity (lower humidity = higher risk)
-    humidity_score = (1.0 - min(humidity / 100.0, 1.0)) * 100
-    
-    # Fire proximity score
-    if fire_distance is not None and fire_distance > 0:
-        # Closer fire = higher risk (inverse relationship)
-        # Normalize: 0-100km range
-        fire_score = max(0, (100 - min(fire_distance, 100)) / 100.0) * 100
-    else:
-        fire_score = 0
-    
-    risk_score = (w1 * temp_score) + (w2 * humidity_score) + (w3 * fire_score)
-    
-    return round(min(risk_score, 100.0), 2)
-
-
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Main Lambda handler for processing IoT sensor data.
@@ -149,37 +205,31 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "deviceId": "esp32-01",
         "temperature": 23.4,
         "humidity": 40.2,
+        "wind_speed": 12.5,
+        "wind_direction": 180,
+        "pressure": 1012,
         "lat": 43.467,
         "lng": -79.699,
         "timestamp": "2025-12-01T16:20:00Z"
     }
-    
-    The IoT Core rule uses: SELECT * FROM 'wildfire/sensors/+'
-    which passes the message payload directly.
     """
     try:
         # Debug: Log the incoming event structure
         print(f"Received event: {json.dumps(event)}")
         
-        # Parse IoT payload - IoT Core SQL SELECT * returns the message payload directly
-        # But sometimes it's wrapped in additional fields
+        # Parse IoT payload
         payload = None
         
-        # Try different event structures
         if 'deviceId' in event and 'temperature' in event:
-            # Direct payload structure
             payload = event
         elif 'temperature' in event:
-            # Payload might be at root level
             payload = event
         elif 'body' in event:
-            # Wrapped in body (API Gateway style, but handle it)
             if isinstance(event['body'], str):
                 payload = json.loads(event['body'])
             else:
                 payload = event['body']
         else:
-            # Default: use event as payload
             payload = event
         
         if not payload:
@@ -188,14 +238,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         print(f"Parsed payload: {json.dumps(payload)}")
         
+        # Extract sensor data
         device_id = payload.get('deviceId')
         temperature = float(payload.get('temperature', 0))
         humidity = float(payload.get('humidity', 0))
+        wind_speed = float(payload.get('wind_speed', 10))
+        wind_direction = float(payload.get('wind_direction', 0))
+        pressure = float(payload.get('pressure', 1013))
         lat = float(payload.get('lat', 0))
         lng = float(payload.get('lng', 0))
         timestamp = payload.get('timestamp', datetime.utcnow().isoformat() + 'Z')
         
-        print(f"Extracted values - deviceId: {device_id}, temp: {temperature}, humidity: {humidity}, lat: {lat}, lng: {lng}, timestamp: {timestamp}")
+        print(f"Extracted values - deviceId: {device_id}, temp: {temperature}, humidity: {humidity}, wind: {wind_speed}, lat: {lat}, lng: {lng}")
         
         # Validate required fields
         if not device_id:
@@ -206,7 +260,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         # Fetch NASA FIRMS wildfire data
         print("Fetching NASA FIRMS wildfire data...")
-        fires = fetch_nasa_firms_data("CAN")  # Canada for now, can be parameterized
+        fires = fetch_nasa_firms_data("CAN")
         print(f"Found {len(fires)} active fires")
         
         # Find nearest fire
@@ -215,21 +269,35 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         fire_distance = fire_info.get('distance')
         print(f"Nearest fire distance: {fire_distance} km")
         
-        # Calculate risk score
-        print("Calculating risk score...")
-        risk_score = calculate_risk_score(temperature, humidity, fire_distance)
-        print(f"Risk score: {risk_score}")
+        # Calculate risk score using ML model (with fallback)
+        print("Calculating ML-based risk score...")
+        risk_score = calculate_risk_score_ml(
+            temperature, humidity, wind_speed, wind_direction, pressure
+        )
+        print(f"ML Risk score: {risk_score}/100")
         
-        # Prepare DynamoDB item (convert floats to Decimals for DynamoDB compatibility)
+        # Determine risk level based on score
+        if risk_score > 60:
+            risk_level = "HIGH"
+        elif risk_score > 30:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
+        
+        # Prepare DynamoDB item
         print("Preparing DynamoDB item...")
         dynamodb_item = {
             'deviceId': device_id,
             'timestamp': timestamp,
             'temperature': Decimal(str(temperature)),
             'humidity': Decimal(str(humidity)),
+            'wind_speed': Decimal(str(wind_speed)),
+            'wind_direction': Decimal(str(wind_direction)),
+            'pressure': Decimal(str(pressure)),
             'lat': Decimal(str(lat)),
             'lng': Decimal(str(lng)),
-            'riskScore': Decimal(str(risk_score)),
+            'riskScore': Decimal(str(risk_score / 100)),  # Store as 0-1 scale
+            'riskLevel': risk_level,
             'nearestFireDistance': Decimal(str(fire_distance)) if fire_distance else Decimal('-1'),
             'nearestFireData': json.dumps(fire_info.get('fire_data')) if fire_info.get('fire_data') else None,
             'ttl': int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
@@ -246,12 +314,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'success': True,
                 'deviceId': device_id,
                 'riskScore': risk_score,
-                'fireDistance': fire_distance
+                'riskLevel': risk_level,
+                'fireDistance': fire_distance,
+                'modelUsed': 'ml' if model_loaded else 'fallback'
             })
         }
         
     except Exception as e:
         print(f"Error processing sensor data: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             'statusCode': 500,
             'body': json.dumps({
@@ -260,3 +332,5 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             })
         }
 
+# Load ML model on cold start
+load_ml_model()
