@@ -16,7 +16,7 @@ import numpy as np
 from datetime import datetime
 import json
 
-# Import API handler functions
+# Import API handler functions - these now include Vertex AI integration
 from api_handler import get_all_sensors, get_sensor_by_id, get_risk_map_data
 
 app = Flask(__name__)
@@ -32,7 +32,7 @@ dynamodb = boto3.resource(
     region_name='us-east-1'
 )
 
-# ==================== ML Components ====================
+# ==================== ML Components (for local training only) ====================
 
 class WildfireDataProcessor:
     """Process sensor and weather data for wildfire prediction"""
@@ -342,16 +342,16 @@ class WildfirePredictor:
         return predictions
 
 
-# Initialize ML components
+# Initialize ML components (for local training only)
 ml_processor = WildfireDataProcessor()
 ml_trainer = WildfireModelTrainer()
 ml_predictor = WildfirePredictor()
 
 # Try to load latest model on startup
 if ml_predictor.load_latest_model():
-    print("✅ ML model loaded successfully")
+    print("✅ Local ML model loaded successfully")
 else:
-    print("⚠️ No ML model found. Train one using POST /api/ml/train")
+    print("⚠️ No local ML model found. Train one using POST /api/ml/train")
 
 # ==================== ML API Endpoints ====================
 
@@ -370,7 +370,7 @@ def ml_predict():
                 'error': 'No data provided'
             }), 400
         
-        # Make prediction
+        # Make prediction using local predictor
         result = ml_predictor.predict_from_sensor_data(data)
         
         if 'error' in result:
@@ -513,17 +513,8 @@ def ml_health():
 @app.route('/api/sensors', methods=['GET'])
 def api_sensors():
     """Get all sensors endpoint"""
+    # Get sensors from api_handler - they already include ML predictions from Vertex AI or local model
     sensors = get_all_sensors()
-    
-    # Enhance sensor data with ML predictions if model is loaded
-    if ml_predictor.model is not None and sensors:
-        for sensor in sensors:
-            # Make prediction for each sensor
-            pred = ml_predictor.predict_from_sensor_data(sensor)
-            if 'risk_score' in pred:
-                sensor['fire_risk'] = pred['risk_score']
-                sensor['risk_level'] = pred['risk_level']
-    
     return jsonify(sensors)
 
 @app.route('/api/nasa-fires', methods=['GET'])
@@ -538,15 +529,9 @@ def nasa_fires():
 @app.route('/api/sensor/<device_id>', methods=['GET'])
 def api_sensor(device_id):
     """Get sensor by ID endpoint"""
+    # Get sensor from api_handler - already includes ML predictions
     sensor = get_sensor_by_id(device_id)
     if sensor:
-        # Add ML prediction for this sensor
-        if ml_predictor.model is not None:
-            pred = ml_predictor.predict_from_sensor_data(sensor)
-            if 'risk_score' in pred:
-                sensor['fire_risk'] = pred['risk_score']
-                sensor['risk_level'] = pred['risk_level']
-        
         return jsonify(sensor)
     else:
         return jsonify({'error': 'Sensor not found'}), 404
@@ -554,24 +539,8 @@ def api_sensor(device_id):
 @app.route('/api/risk-map', methods=['GET'])
 def api_risk_map():
     """Get risk map data endpoint with ML predictions"""
+    # Get map data from api_handler - already includes ML predictions
     map_data = get_risk_map_data()
-    
-    # Add ML predictions to map data if model is loaded
-    if ml_predictor.model is not None and 'zones' in map_data:
-        for zone in map_data['zones']:
-            # Create synthetic sensor data from zone info
-            sensor_data = {
-                'temperature': zone.get('temperature', 25),
-                'humidity': zone.get('humidity', 50),
-                'wind_speed': zone.get('wind_speed', 10),
-                'latitude': zone.get('lat'),
-                'longitude': zone.get('lng')
-            }
-            pred = ml_predictor.predict_from_sensor_data(sensor_data)
-            if 'risk_score' in pred:
-                zone['fire_risk'] = pred['risk_score']
-                zone['risk_level'] = pred['risk_level']
-    
     return jsonify(map_data)
 
 @app.route('/api/ml/predict/sensor/<device_id>', methods=['GET'])

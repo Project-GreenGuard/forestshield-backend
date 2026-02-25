@@ -13,6 +13,7 @@ Endpoints:
 import json
 import boto3
 import os
+import time  # ADDED for delays
 from boto3.dynamodb.conditions import Key
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -23,7 +24,21 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 import warnings
+import requests
+import google.auth.transport.requests
+from google.oauth2 import service_account
+
 warnings.filterwarnings("ignore", message="X does not have valid feature names")
+
+
+# ==================== Vertex AI Configuration ====================
+
+# Load from environment variables
+VERTEX_PROJECT_ID = os.getenv('VERTEX_PROJECT_ID', 'forestshield-ai-488218')
+VERTEX_ENDPOINT_ID = os.getenv('VERTEX_ENDPOINT_ID', '2181992919949377536')
+VERTEX_LOCATION = os.getenv('VERTEX_LOCATION', 'us-central1')
+VERTEX_CREDENTIALS_PATH = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'vertex-key.json')
+USE_VERTEX = os.getenv('USE_VERTEX', 'false').lower() == 'true'
 
 
 # ==================== ML Components ====================
@@ -39,18 +54,110 @@ class WildfireML:
             'temperature', 'humidity', 'wind_speed', 
             'wind_direction', 'pressure', 'vegetation_index'
         ]
+        self.use_vertex = USE_VERTEX
+        self.project_id = VERTEX_PROJECT_ID
+        self.endpoint_id = VERTEX_ENDPOINT_ID
+        self.location = VERTEX_LOCATION
+        self.credentials_path = VERTEX_CREDENTIALS_PATH
+        
+        # Load local model as fallback
         self.load_model()
+        if self.use_vertex:
+            print(f"✅ Vertex AI enabled - Endpoint: {self.endpoint_id}")
     
     def load_model(self):
         """Load trained model if exists"""
         try:
             if os.path.exists(self.model_path):
                 self.model = joblib.load(self.model_path)
-                print(f"✅ ML Model loaded from {self.model_path}")
+                print(f"✅ Local ML Model loaded from {self.model_path}")
             else:
                 print("⚠️ No trained model found. Using rule-based fallback.")
         except Exception as e:
             print(f"❌ Error loading model: {e}")
+    
+    def predict_with_vertex(self, sensor_data):
+        """Call Vertex AI endpoint for prediction with timeout"""
+        try:
+            # Check if credentials file exists
+            if not os.path.exists(self.credentials_path):
+                print(f"❌ Vertex AI credentials not found at {self.credentials_path}")
+                return None
+            
+            # Load credentials
+            credentials = service_account.Credentials.from_service_account_file(
+                self.credentials_path,
+                scopes=['https://www.googleapis.com/auth/cloud-platform']
+            )
+            
+            # Get token
+            auth_req = google.auth.transport.requests.Request()
+            credentials.refresh(auth_req)
+            token = credentials.token
+            
+            # Prepare request - using array format that worked in Cloud Shell
+            url = f"https://{self.location}-aiplatform.googleapis.com/v1/projects/{self.project_id}/locations/{self.location}/endpoints/{self.endpoint_id}:predict"
+            
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            # Calculate vegetation index if needed
+            veg_index = self._calculate_vegetation_index(sensor_data)
+            
+            # Format as simple array (what worked in Cloud Shell)
+            instances = [[
+                float(sensor_data.get('temperature', 25)),
+                float(sensor_data.get('humidity', 50)),
+                float(sensor_data.get('wind_speed', 10)),
+                float(sensor_data.get('wind_direction', 0)),
+                float(sensor_data.get('pressure', 1013)),
+                veg_index
+            ]]
+            
+            print(f"📤 Sending request to Vertex AI: {instances[0]}")
+            
+            # ADDED TIMEOUT to prevent hanging
+            response = requests.post(
+                url, 
+                headers=headers, 
+                json={"instances": instances},
+                timeout=10  # 10 second timeout
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if 'predictions' in result and len(result['predictions']) > 0:
+                    risk_score = float(result['predictions'][0])
+                    # Ensure risk_score is between 0 and 1
+                    risk_score = max(0, min(1, risk_score))
+                    
+                    # Determine risk level
+                    if risk_score >= 0.7:
+                        risk_level = 'HIGH'
+                    elif risk_score >= 0.3:
+                        risk_level = 'MEDIUM'
+                    else:
+                        risk_level = 'LOW'
+                    
+                    print(f"✅ Vertex AI prediction: {risk_score} ({risk_level})")
+                    
+                    return {
+                        'risk_score': round(risk_score, 3),
+                        'risk_level': risk_level,
+                        'model_used': 'vertex-ai'
+                    }
+            else:
+                print(f"❌ Vertex AI error ({response.status_code}): {response.text}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            print(f"⏱️ Vertex AI timeout - falling back to local model")
+            return None
+        except Exception as e:
+            print(f"❌ Vertex AI prediction error: {e}")
+            return None
     
     def predict(self, sensor_data):
         """
@@ -61,10 +168,18 @@ class WildfireML:
         Returns:
             risk_score (0-1) and risk_level
         """
+        # Try Vertex AI first if enabled
+        if self.use_vertex:
+            vertex_result = self.predict_with_vertex(sensor_data)
+            if vertex_result:
+                return vertex_result
+            else:
+                print("⚠️ Vertex AI failed, falling back to local model")
+        
+        # Fallback to local model or rule-based
         try:
             if self.model is not None:
-                # Use ML model with proper feature names (fixes the warning)
-                # Create DataFrame with proper column names
+                # Use local ML model
                 features_df = pd.DataFrame([[
                     float(sensor_data.get('temperature', 25)),
                     float(sensor_data.get('humidity', 50)),
@@ -77,9 +192,11 @@ class WildfireML:
                 risk_score = float(self.model.predict(features_df)[0])
                 # Ensure risk_score is between 0 and 1
                 risk_score = max(0, min(1, risk_score))
+                model_used = 'local-ml'
             else:
                 # Fallback to rule-based calculation
                 risk_score = self._rule_based_risk(sensor_data)
+                model_used = 'rule-based'
             
             # Determine risk level
             if risk_score >= 0.7:
@@ -92,7 +209,7 @@ class WildfireML:
             return {
                 'risk_score': round(risk_score, 3),
                 'risk_level': risk_level,
-                'model_used': 'ml' if self.model else 'rule-based'
+                'model_used': model_used
             }
             
         except Exception as e:
@@ -202,25 +319,19 @@ class WildfireML:
 # Initialize ML
 ml_model = WildfireML()
 
-# ==================== DynamoDB Setup ====================
+# ==================== DynamoDB Setup - FIXED ====================
 
-# Support both local and AWS DynamoDB
-dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
-if dynamodb_endpoint:
-    # Local development
-    dynamodb = boto3.resource(
-        'dynamodb',
-        endpoint_url=dynamodb_endpoint,
-        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'local'),
-        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'local'),
-        region_name='us-east-1'
-    )
-else:
-    # AWS production
-    dynamodb = boto3.resource(
-        'dynamodb',
-        region_name=os.getenv('AWS_REGION', 'us-east-1')
-    )
+# For local development, always use explicit dummy credentials with localhost endpoint
+dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL', 'http://localhost:8000')
+
+# Always use dummy credentials for local DynamoDB
+dynamodb = boto3.resource(
+    'dynamodb',
+    endpoint_url=dynamodb_endpoint,
+    aws_access_key_id='dummy',
+    aws_secret_access_key='dummy',
+    region_name='us-east-1'
+)
 
 table = dynamodb.Table('WildfireSensorData')
 
@@ -235,6 +346,7 @@ def decimal_default(obj):
 def get_all_sensors():
     """Get all unique sensors with their latest data."""
     try:
+        print("🔍 Scanning DynamoDB table...")
         items = []
         last_evaluated_key = None
         
@@ -244,21 +356,24 @@ def get_all_sensors():
             else:
                 response = table.scan()
             
+            print(f"   Found {len(response.get('Items', []))} items in this batch")
             items.extend(response.get('Items', []))
             last_evaluated_key = response.get('LastEvaluatedKey')
             if not last_evaluated_key:
                 break
         
+        print(f"📊 Total items scanned: {len(items)}")
+        
         sensors = {}
+        count = 0
         for item in items:
             device_id = item['deviceId']
             timestamp = item['timestamp']
             
             if device_id not in sensors or timestamp > sensors[device_id]['timestamp']:
-                # ADDED: location field to sensor_data
                 sensor_data = {
                     'deviceId': device_id,
-                    'location': item.get('location', 'Unknown'),  # ← LOCATION ADDED
+                    'location': item.get('location', 'Unknown'),
                     'temperature': float(item.get('temperature', 0)) if isinstance(item.get('temperature'), Decimal) else item.get('temperature', 25),
                     'humidity': float(item.get('humidity', 0)) if isinstance(item.get('humidity'), Decimal) else item.get('humidity', 50),
                     'wind_speed': float(item.get('wind_speed', 0)) if isinstance(item.get('wind_speed'), Decimal) else item.get('wind_speed', 10),
@@ -270,15 +385,25 @@ def get_all_sensors():
                     'timestamp': timestamp
                 }
                 
+                # Add small delay every 5 requests to prevent overwhelming Vertex AI
+                count += 1
+                if count % 5 == 0 and ml_model.use_vertex:
+                    print(f"⏱️ Small delay to prevent overwhelming Vertex AI...")
+                    time.sleep(0.1)  # 100ms delay
+                
                 prediction = ml_model.predict(sensor_data)
                 sensor_data['riskScore'] = prediction['risk_score']
                 sensor_data['riskLevel'] = prediction['risk_level']
                 
                 sensors[device_id] = sensor_data
         
-        return list(sensors.values())
+        result = list(sensors.values())
+        print(f"✅ Returning {len(result)} unique sensors")
+        return result
     except Exception as e:
-        print(f"Error getting sensors: {e}")
+        print(f"❌ Error getting sensors: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
@@ -301,7 +426,6 @@ def get_sensor_by_id(device_id: str):
                 else:
                     result[key] = value
             
-            # ADDED: Ensure location is in the result
             if 'location' not in result:
                 result['location'] = 'Unknown'
             
@@ -338,10 +462,9 @@ def get_risk_map_data():
             
             prediction = ml_model.predict(sensor_data)
             
-            # ADDED: location field to map data
             map_data.append({
                 'deviceId': sensor_data.get('deviceId'),
-                'location': sensor_data.get('location', 'Unknown'),  # ← LOCATION ADDED
+                'location': sensor_data.get('location', 'Unknown'),
                 'lat': sensor_data.get('lat'),
                 'lng': sensor_data.get('lng'),
                 'riskScore': prediction['risk_score'],
@@ -483,7 +606,9 @@ def ml_model_info_handler():
             'model_loaded': ml_model.model is not None,
             'model_path': ml_model.model_path,
             'features': ml_model.feature_columns,
-            'model_type': type(ml_model.model).__name__ if ml_model.model else None
+            'model_type': type(ml_model.model).__name__ if ml_model.model else None,
+            'use_vertex': ml_model.use_vertex,
+            'vertex_endpoint': ml_model.endpoint_id if ml_model.use_vertex else None
         })
     }
 
