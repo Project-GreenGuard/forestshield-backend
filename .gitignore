@@ -60,3 +60,4 @@ logs/
 *.crt
 *.cert
 
+vertex-key.json
