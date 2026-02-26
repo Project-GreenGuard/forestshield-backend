@@ -529,10 +529,10 @@ def ml_train_handler(event):
         if not os.path.isabs(data_path):
             # Try multiple possible locations
             possible_paths = [
-                os.path.join(os.getcwd(), data_path),  # Current directory
-                os.path.join(os.path.dirname(__file__), '..', data_path),  # Project root
-                os.path.join(os.path.dirname(__file__), data_path),  # Same directory as script
-                data_path  # As is
+                os.path.join(os.getcwd(), data_path),
+                os.path.join(os.path.dirname(__file__), '..', data_path),
+                os.path.join(os.path.dirname(__file__), data_path),
+                data_path
             ]
         else:
             possible_paths = [data_path]
