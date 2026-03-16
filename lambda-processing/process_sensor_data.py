@@ -12,9 +12,28 @@ import json
 import boto3
 import os
 import requests
+import sys
+from pathlib import Path
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any
+
+# Add AI model to path and import
+# Note: In local dev, go up 3 levels to reach forestshield-ai
+# In AWS Lambda, forestshield-ai should be packaged in the deployment
+ai_path = Path(__file__).parent.parent.parent / 'forestshield-ai'
+if ai_path.exists():
+    sys.path.insert(0, str(ai_path))
+else:
+    # Fallback: AI code packaged directly in Lambda
+    sys.path.insert(0, str(Path(__file__).parent))
+
+try:
+    from inference.predict import predict_risk
+    AI_MODEL_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: AI model not available: {e}")
+    AI_MODEL_AVAILABLE = False
 
 # Initialize AWS clients - support both local and AWS DynamoDB
 dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
@@ -112,32 +131,33 @@ def find_nearest_fire(sensor_lat: float, sensor_lng: float, fires: list) -> Dict
     }
 
 
-def calculate_risk_score(temperature: float, humidity: float, fire_distance: float = None) -> float:
+def calculate_simple_risk(temperature: float, humidity: float, fire_distance: float = None) -> float:
     """
-    Simple risk scoring algorithm.
-    risk = w1*temperature + w2*(1/humidity) + w3*(1/distance_to_fire)
+    Fallback risk calculation when AI model is unavailable.
+    Simple weighted formula for basic risk scoring.
     """
-    w1 = 0.4  # Temperature weight
-    w2 = 0.3  # Humidity weight
-    w3 = 0.3  # Fire proximity weight
+    w1, w2, w3 = 0.4, 0.3, 0.3
     
-    # Normalize temperature (0-50°C range)
     temp_score = min(temperature / 50.0, 1.0) * 100
-    
-    # Inverse humidity (lower humidity = higher risk)
     humidity_score = (1.0 - min(humidity / 100.0, 1.0)) * 100
     
-    # Fire proximity score
     if fire_distance is not None and fire_distance > 0:
-        # Closer fire = higher risk (inverse relationship)
-        # Normalize: 0-100km range
         fire_score = max(0, (100 - min(fire_distance, 100)) / 100.0) * 100
     else:
         fire_score = 0
     
     risk_score = (w1 * temp_score) + (w2 * humidity_score) + (w3 * fire_score)
-    
     return round(min(risk_score, 100.0), 2)
+
+
+def get_risk_level(risk_score: float) -> str:
+    """Convert risk score to level category."""
+    if risk_score <= 30:
+        return "LOW"
+    elif risk_score <= 60:
+        return "MEDIUM"
+    else:
+        return "HIGH"
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -215,10 +235,37 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         fire_distance = fire_info.get('distance')
         print(f"Nearest fire distance: {fire_distance} km")
         
-        # Calculate risk score
-        print("Calculating risk score...")
-        risk_score = calculate_risk_score(temperature, humidity, fire_distance)
-        print(f"Risk score: {risk_score}")
+        # Calculate risk score using AI model
+        print("Calculating risk score with AI model...")
+        
+        # Build payload for AI model
+        sensor_payload = {
+            'temperature': temperature,
+            'humidity': humidity,
+            'lat': lat,
+            'lng': lng,
+            'nearestFireDistance': fire_distance if fire_distance else 999.0,
+            'timestamp': timestamp
+        }
+        
+        # Call AI prediction model with fallback
+        if AI_MODEL_AVAILABLE:
+            try:
+                prediction = predict_risk(sensor_payload)
+                risk_score = prediction['risk_score']
+                risk_level = prediction['risk_level']
+                confidence = prediction['confidence']
+                print(f"AI Prediction - Risk: {risk_score} ({risk_level}) - Confidence: {confidence}")
+            except Exception as e:
+                print(f"AI model prediction failed: {e}. Using fallback calculation.")
+                risk_score = calculate_simple_risk(temperature, humidity, fire_distance)
+                risk_level = get_risk_level(risk_score)
+                confidence = 0.5
+        else:
+            print("AI model not available. Using fallback calculation.")
+            risk_score = calculate_simple_risk(temperature, humidity, fire_distance)
+            risk_level = get_risk_level(risk_score)
+            confidence = 0.5
         
         # Prepare DynamoDB item (convert floats to Decimals for DynamoDB compatibility)
         print("Preparing DynamoDB item...")
@@ -230,6 +277,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'lat': Decimal(str(lat)),
             'lng': Decimal(str(lng)),
             'riskScore': Decimal(str(risk_score)),
+            'riskLevel': risk_level,
+            'confidence': Decimal(str(confidence)),
+            'modelUsed': 'AI' if AI_MODEL_AVAILABLE else 'fallback',
             'nearestFireDistance': Decimal(str(fire_distance)) if fire_distance else Decimal('-1'),
             'nearestFireData': json.dumps(fire_info.get('fire_data')) if fire_info.get('fire_data') else None,
             'ttl': int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
