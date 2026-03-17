@@ -5,6 +5,8 @@ Endpoints:
 - GET /api/sensors - List all sensors
 - GET /api/sensor/{id} - Get sensor by ID
 - GET /api/risk-map - Get risk map data
+- POST /api/risk-detailed - Get detailed risk scoring (PBI-7)
+- GET /api/model-health - Get model health status (PBI-7)
 """
 
 import json
@@ -14,6 +16,20 @@ from boto3.dynamodb.conditions import Key
 from datetime import datetime, timedelta
 from decimal import Decimal
 from nasa_firms_service import get_nasa_fires
+from pathlib import Path
+import sys
+
+# Add parent directory for ML imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    from inference.hybrid_scoring import predict_risk_hybrid
+    from training.drift_detection import calculate_baseline_metrics, detect_drift
+    from inference.store_prediction import store_prediction
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+    print("[WARN] ML modules not available - detailed scoring disabled")
 
 
 # Support both local and AWS DynamoDB
@@ -144,6 +160,113 @@ def get_risk_map_data():
     except Exception as e:
         print(f"Error getting risk map data: {e}")
         return []
+
+
+def get_detailed_risk(payload):
+    """
+    Get detailed risk scoring with ML breakdown.
+    Supports PBI-7: Enhanced Risk Scoring UI
+    
+    Args:
+        payload: Dict with sensor data
+    
+    Returns:
+        Dict with ml_score, rule_score, combined_score, etc.
+    """
+    if not ML_AVAILABLE:
+        return {
+            'error': 'ML modules not available',
+            'combined_score': payload.get('riskScore', 0)
+        }
+    
+    try:
+        # Get hybrid prediction (ML + rules)
+        result = predict_risk_hybrid(payload)
+        
+        # Check for model drift
+        baseline = calculate_baseline_metrics(Path("training/logs/baseline_predictions.csv"))
+        drift_result = detect_drift(Path("training/logs/predictions.csv"), baseline)
+        
+        # Store this prediction for monitoring
+        store_prediction(result['combined_score'], result['combined_level'])
+        
+        response = {
+            'ml_score': round(result['ml_score'], 2),
+            'ml_level': result['ml_level'],
+            'ml_confidence': round(result['ml_confidence'], 2),
+            'rule_score': round(result['rule_score'], 2),
+            'rule_level': result['rule_level'],
+            'combined_score': round(result['combined_score'], 2),
+            'combined_level': result['combined_level'],
+            'model_version': result['model_version'],
+            'model_drift': {
+                'has_drift': drift_result.get('has_drift', False),
+                'rmse_change_pct': round(drift_result.get('rmse_increase_pct', 0), 1),
+                'num_predictions': drift_result.get('num_predictions', 0)
+            }
+        }
+        
+        return response
+    
+    except Exception as e:
+        print(f"[ERROR] get_detailed_risk failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}
+
+
+def get_model_health():
+    """
+    Get current model health status.
+    Includes drift detection, prediction count, and recommendations.
+    """
+    if not ML_AVAILABLE:
+        return {
+            'status': 'UNKNOWN',
+            'drift_detected': False,
+            'predictions_count': 0,
+            'error': 'ML modules not available'
+        }
+    
+    try:
+        baseline = calculate_baseline_metrics(Path("training/logs/baseline_predictions.csv"))
+        drift_result = detect_drift(Path("training/logs/predictions.csv"), baseline)
+        
+        # Determine health status
+        status = "HEALTHY"
+        recommendations = []
+        
+        if drift_result.get('rmse_increase_pct', 0) > 25:
+            status = "CRITICAL"
+            recommendations.append("RMSE increased >25% - Retrain immediately")
+        elif drift_result.get('has_drift', False):
+            status = "WARNING"
+            recommendations.append("Model drift detected - Consider retraining")
+        
+        if drift_result.get('num_predictions', 0) > 500:
+            recommendations.append("High prediction volume - Monitor performance closely")
+        
+        response = {
+            'status': status,
+            'drift_detected': drift_result.get('has_drift', False),
+            'predictions_count': drift_result.get('num_predictions', 0),
+            'rmse': round(drift_result.get('current_rmse', 0), 2),
+            'accuracy': round(drift_result.get('current_accuracy', 0), 3),
+            'baseline_rmse': round(baseline.get('rmse', 0), 2),
+            'recommendations': recommendations
+        }
+        
+        return response
+    
+    except Exception as e:
+        print(f"[ERROR] get_model_health failed: {e}")
+        return {
+            'status': 'UNKNOWN',
+            'drift_detected': False,
+            'predictions_count': 0,
+            'error': str(e)
+        }
+
     
 def get_nasa_data(event, context):
     fires = get_nasa_fires()
@@ -225,6 +348,17 @@ def lambda_handler(event, context):
                     'body': json.dumps(map_data, default=decimal_default)
                 }
             
+            elif path == '/api/model-health' or normalized_path == '/api/model-health' or path == '/model-health':
+                health = get_model_health()
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps(health, default=decimal_default)
+                }
+            
             elif path == '/api/nasa-fires' or normalized_path == '/api/nasa-fires' or path == '/nasa-fires':
                 return get_nasa_data(event, context)
 
@@ -238,6 +372,40 @@ def lambda_handler(event, context):
                     },
                     'body': json.dumps({'error': 'Not found', 'path': path, 'method': http_method})
                 }
+        
+        elif http_method == 'POST':
+            if path == '/api/risk-detailed' or normalized_path == '/api/risk-detailed' or path == '/risk-detailed':
+                try:
+                    payload = json.loads(event.get('body', '{}'))
+                    detailed = get_detailed_risk(payload)
+                    return {
+                        'statusCode': 200,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps(detailed, default=decimal_default)
+                    }
+                except json.JSONDecodeError:
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Invalid JSON'})
+                    }
+            
+            else:
+                return {
+                    'statusCode': 404,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': 'Not found', 'path': path, 'method': http_method})
+                }
+        
         else:
             return {
                 'statusCode': 405,
@@ -258,6 +426,3 @@ def lambda_handler(event, context):
             },
             'body': json.dumps({'error': str(e)})
         }
-
-
-
