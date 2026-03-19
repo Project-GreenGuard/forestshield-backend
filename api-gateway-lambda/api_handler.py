@@ -1,428 +1,135 @@
-"""
-API Gateway Lambda handler for dashboard endpoints.
-
-Endpoints:
-- GET /api/sensors - List all sensors
-- GET /api/sensor/{id} - Get sensor by ID
-- GET /api/risk-map - Get risk map data
-- POST /api/risk-detailed - Get detailed risk scoring (PBI-7)
-- GET /api/model-health - Get model health status (PBI-7)
-"""
-
-import json
+"""API Handler - Local development with mock data"""
 import boto3
+from datetime import datetime
 import os
-from boto3.dynamodb.conditions import Key
-from datetime import datetime, timedelta
-from decimal import Decimal
-from nasa_firms_service import get_nasa_fires
-from pathlib import Path
-import sys
 
-# Add parent directory for ML imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL', 'http://dynamodb:8000')
+dynamodb = boto3.resource('dynamodb', endpoint_url=dynamodb_endpoint, 
+    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'local'),
+    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'local'),
+    region_name=os.getenv('AWS_DEFAULT_REGION', 'us-east-1'))
 
-try:
-    from inference.hybrid_scoring import predict_risk_hybrid
-    from training.drift_detection import calculate_baseline_metrics, detect_drift
-    from inference.store_prediction import store_prediction
-    ML_AVAILABLE = True
-except ImportError:
-    ML_AVAILABLE = False
-    print("[WARN] ML modules not available - detailed scoring disabled")
+SENSORS_TABLE = 'WildfireSensorData'
 
-
-# Support both local and AWS DynamoDB
-dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
-if dynamodb_endpoint:
-    # Local development
-    dynamodb = boto3.resource(
-        'dynamodb',
-        endpoint_url=dynamodb_endpoint,
-        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'local'),
-        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'local'),
-        region_name='us-east-1'
-    )
-else:
-    # AWS production
-    dynamodb = boto3.resource('dynamodb')
-
-table = dynamodb.Table('WildfireSensorData')
-
-
-def decimal_default(obj):
-    """Convert Decimal to float for JSON serialization."""
-    if isinstance(obj, Decimal):
-        return float(obj)
-    raise TypeError
-
-
-def get_all_sensors():
-    """Get all unique sensors with their latest data."""
+def get_table(table_name):
     try:
-        # Scan table with pagination to get all devices
-        items = []
-        last_evaluated_key = None
-        
-        while True:
-            if last_evaluated_key:
-                response = table.scan(ExclusiveStartKey=last_evaluated_key)
-            else:
-                response = table.scan()
-            
-            items.extend(response.get('Items', []))
-            
-            # Check if there are more items to scan
-            last_evaluated_key = response.get('LastEvaluatedKey')
-            if not last_evaluated_key:
-                break
-        
-        # Group by deviceId and get latest for each
-        sensors = {}
-        for item in items:
-            device_id = item['deviceId']
-            timestamp = item['timestamp']
-            
-            # Compare timestamps (ISO format strings compare correctly)
-            if device_id not in sensors or timestamp > sensors[device_id]['timestamp']:
-                sensors[device_id] = {
-                    'deviceId': device_id,
-                    'temperature': float(item.get('temperature', 0)) if isinstance(item.get('temperature'), Decimal) else item.get('temperature'),
-                    'humidity': float(item.get('humidity', 0)) if isinstance(item.get('humidity'), Decimal) else item.get('humidity'),
-                    'lat': float(item.get('lat', 0)) if isinstance(item.get('lat'), Decimal) else item.get('lat'),
-                    'lng': float(item.get('lng', 0)) if isinstance(item.get('lng'), Decimal) else item.get('lng'),
-                    'riskScore': float(item.get('riskScore', 0)) if isinstance(item.get('riskScore'), Decimal) else item.get('riskScore'),
-                    'nearestFireDistance': float(item.get('nearestFireDistance', -1)) if isinstance(item.get('nearestFireDistance'), Decimal) else item.get('nearestFireDistance'),
-                    'timestamp': timestamp
-                }
-        
-        return list(sensors.values())
-    except Exception as e:
-        print(f"Error getting sensors: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
-
-def get_sensor_by_id(device_id: str):
-    """Get latest data for a specific sensor."""
-    try:
-        response = table.query(
-            KeyConditionExpression=Key('deviceId').eq(device_id),
-            ScanIndexForward=False,  # Get most recent first
-            Limit=1
-        )
-        
-        items = response.get('Items', [])
-        if items:
-            item = items[0]
-            # Convert Decimal to float for JSON serialization
-            result = {}
-            for key, value in item.items():
-                if isinstance(value, Decimal):
-                    result[key] = float(value)
-                else:
-                    result[key] = value
-            return result
-        return None
-    except Exception as e:
-        print(f"Error getting sensor {device_id}: {e}")
+        table = dynamodb.Table(table_name)
+        table.load()
+        return table
+    except:
         return None
 
+# ✅ MOCK SENSOR DATA
+ONTARIO_CITIES = [
+    ('SENSOR-001', 'Toronto Downtown', 43.6629, -79.3957, 72.5),
+    ('SENSOR-002', 'Ottawa Parliament Hill', 45.4215, -75.6972, 38.0),
+    ('SENSOR-003', 'Hamilton Downtown', 43.2557, -79.8711, 28.0),
+    ('SENSOR-004', 'London Downtown', 42.9849, -81.2453, 52.0),
+    ('SENSOR-005', 'Windsor Downtown', 42.3149, -83.0364, 65.0),
+    ('SENSOR-006', 'Kitchener Downtown', 43.4516, -80.4925, 35.0),
+    ('SENSOR-007', 'Niagara Falls Downtown', 43.0896, -79.0849, 25.0),
+    ('SENSOR-008', 'Sudbury Downtown', 46.4917, -80.9930, 42.0),
+    ('SENSOR-009', 'Timmins Downtown', 48.4758, -81.3304, 32.0),
+    ('SENSOR-010', 'Thunder Bay Downtown', 48.3809, -89.2477, 28.0),
+]
 
-def get_risk_map_data():
-    """Get risk map data for visualization (last 24 hours)."""
-    try:
-        # Get data from last 24 hours
-        cutoff_time = (datetime.utcnow() - timedelta(hours=24)).isoformat() + 'Z'
-        
-        response = table.scan(
-            FilterExpression=Key('timestamp').gte(cutoff_time)
-        )
-        
-        items = response.get('Items', [])
-        
-        # Format for map visualization
-        map_data = []
-        for item in items:
-            map_data.append({
-                'deviceId': item['deviceId'],
-                'lat': item.get('lat'),
-                'lng': item.get('lng'),
-                'riskScore': item.get('riskScore'),
-                'temperature': item.get('temperature'),
-                'humidity': item.get('humidity'),
-                'nearestFireDistance': item.get('nearestFireDistance'),
-                'timestamp': item.get('timestamp')
-            })
-        
-        return map_data
-    except Exception as e:
-        print(f"Error getting risk map data: {e}")
-        return []
+def calculate_fire_spread_direction(wind_direction):
+    """Fire spreads opposite to wind direction"""
+    return (wind_direction + 180) % 360
 
-
-def get_detailed_risk(payload):
-    """
-    Get detailed risk scoring with ML breakdown.
-    Supports PBI-7: Enhanced Risk Scoring UI
-    
-    Args:
-        payload: Dict with sensor data
-    
-    Returns:
-        Dict with ml_score, rule_score, combined_score, etc.
-    """
-    if not ML_AVAILABLE:
-        return {
-            'error': 'ML modules not available',
-            'combined_score': payload.get('riskScore', 0)
-        }
-    
-    try:
-        # Get hybrid prediction (ML + rules)
-        result = predict_risk_hybrid(payload)
-        
-        # Check for model drift
-        baseline = calculate_baseline_metrics(Path("training/logs/baseline_predictions.csv"))
-        drift_result = detect_drift(Path("training/logs/predictions.csv"), baseline)
-        
-        # Store this prediction for monitoring
-        store_prediction(result['combined_score'], result['combined_level'])
-        
-        response = {
-            'ml_score': round(result['ml_score'], 2),
-            'ml_level': result['ml_level'],
-            'ml_confidence': round(result['ml_confidence'], 2),
-            'rule_score': round(result['rule_score'], 2),
-            'rule_level': result['rule_level'],
-            'combined_score': round(result['combined_score'], 2),
-            'combined_level': result['combined_level'],
-            'model_version': result['model_version'],
-            'model_drift': {
-                'has_drift': drift_result.get('has_drift', False),
-                'rmse_change_pct': round(drift_result.get('rmse_increase_pct', 0), 1),
-                'num_predictions': drift_result.get('num_predictions', 0)
-            }
-        }
-        
-        return response
-    
-    except Exception as e:
-        print(f"[ERROR] get_detailed_risk failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return {'error': str(e)}
-
-
-def get_model_health():
-    """
-    Get current model health status.
-    Includes drift detection, prediction count, and recommendations.
-    """
-    if not ML_AVAILABLE:
-        return {
-            'status': 'UNKNOWN',
-            'drift_detected': False,
-            'predictions_count': 0,
-            'error': 'ML modules not available'
-        }
-    
-    try:
-        baseline = calculate_baseline_metrics(Path("training/logs/baseline_predictions.csv"))
-        drift_result = detect_drift(Path("training/logs/predictions.csv"), baseline)
-        
-        # Determine health status
-        status = "HEALTHY"
-        recommendations = []
-        
-        if drift_result.get('rmse_increase_pct', 0) > 25:
-            status = "CRITICAL"
-            recommendations.append("RMSE increased >25% - Retrain immediately")
-        elif drift_result.get('has_drift', False):
-            status = "WARNING"
-            recommendations.append("Model drift detected - Consider retraining")
-        
-        if drift_result.get('num_predictions', 0) > 500:
-            recommendations.append("High prediction volume - Monitor performance closely")
-        
-        response = {
-            'status': status,
-            'drift_detected': drift_result.get('has_drift', False),
-            'predictions_count': drift_result.get('num_predictions', 0),
-            'rmse': round(drift_result.get('current_rmse', 0), 2),
-            'accuracy': round(drift_result.get('current_accuracy', 0), 3),
-            'baseline_rmse': round(baseline.get('rmse', 0), 2),
-            'recommendations': recommendations
-        }
-        
-        return response
-    
-    except Exception as e:
-        print(f"[ERROR] get_model_health failed: {e}")
-        return {
-            'status': 'UNKNOWN',
-            'drift_detected': False,
-            'predictions_count': 0,
-            'error': str(e)
-        }
-
-    
-def get_nasa_data(event, context):
-    fires = get_nasa_fires()
-
+def create_sensor(device_id, name, lat, lng, risk_score):
+    """Create sensor with mock data"""
     return {
-        "statusCode": 200,
-        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-        "body": json.dumps({
-            "source": "NASA FIRMS",
-            "count": len(fires),
-            "fires": fires
-        }, default=decimal_default)
+        'id': device_id.lower().replace('-', '_'),
+        'deviceId': device_id,
+        'name': name,
+        'lat': lat,
+        'lng': lng,
+        'temperature': 25.0,
+        'humidity': 50.0,
+        'wind_speed': 12.0,
+        'wind_direction': 180.0,
+        'fire_spread_direction': calculate_fire_spread_direction(180.0),
+        'vegetation_density': 0.70,
+        'soil_moisture': 0.35,
+        'elevation': 300,
+        'nearest_water': 5,
+        'fire_history': 3,
+        'population_density': 50,
+        'riskScore': risk_score,
+        'timestamp': datetime.utcnow().isoformat(),
+        'nearestFireDistance': 15.0,
     }
 
+def get_fallback_sensors():
+    """Get mock sensors"""
+    return [create_sensor(did, name, lat, lng, risk) 
+            for did, name, lat, lng, risk in ONTARIO_CITIES]
 
-def lambda_handler(event, context):
-    """API Gateway Lambda handler."""
+def get_all_sensors():
+    """Get all sensors from DynamoDB or fallback to mock"""
+    table = get_table(SENSORS_TABLE)
+    if table:
+        try:
+            response = table.scan(Limit=100)
+            return response.get('Items', get_fallback_sensors())
+        except:
+            pass
+    return get_fallback_sensors()
+
+def get_sensor_by_id(sensor_id):
+    """Get a single sensor by ID - handle both formats"""
+    table = get_table(SENSORS_TABLE)
+    if table:
+        try:
+            response = table.get_item(Key={'sensorId': sensor_id})
+            if 'Item' in response:
+                return response['Item']
+        except:
+            pass
+    
+    # Fallback to mock sensors - handle BOTH formats!
+    sensor_id_lower = sensor_id.lower().replace('-', '_')  # ✅ Normalize
+    
+    for sensor in get_fallback_sensors():
+        if (sensor['id'] == sensor_id_lower or 
+            sensor['deviceId'] == sensor_id or
+            sensor['deviceId'].lower() == sensor_id_lower):  # ✅ Match either way
+            return sensor
+    return None
+
+def get_risk_map_data():
+    """Get data for risk map visualization"""
+    return {
+        'sensors': get_all_sensors(),
+        'timestamp': datetime.utcnow().isoformat(),
+        'bounds': {'north': 49.0, 'south': 42.0, 'east': -74.0, 'west': -90.0}
+    }
+
+def get_detailed_risk(payload):
+    """Get detailed risk info for a sensor"""
+    sensor_id = payload.get('sensor_id')
+    sensor = get_sensor_by_id(sensor_id)
+    if not sensor:
+        return {'error': f'Sensor {sensor_id} not found'}
+    return {
+        'sensor_id': sensor_id,
+        'timestamp': datetime.utcnow().isoformat(),
+        'risk_score': sensor.get('riskScore', 50),
+    }
+
+def get_model_health():
+    """Check if ML model is loaded"""
     try:
-        http_method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method')
-        path = event.get('path') or event.get('requestContext', {}).get('path') or event.get('rawPath', '')
-        
-        print(f"Parsed - Method: {http_method}, Path: {path}")
-        
-        # Normalize path - API Gateway may send /api/sensors or /sensors depending on resource structure
-        # Handle both formats for compatibility
-        if not path:
-            path = '/'
-        normalized_path = path
-        if path and not path.startswith('/api'):
-            normalized_path = f'/api{path}' if path.startswith('/') else f'/api/{path}'
-        
-        # Parse path parameters
-        path_params = event.get('pathParameters') or {}
-        
-        # Route requests - check both original path and normalized path
-        if http_method == 'GET':
-            if path == '/api/sensors' or normalized_path == '/api/sensors' or path == '/sensors':
-                sensors = get_all_sensors()
-                return {
-                    'statusCode': 200,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': json.dumps(sensors, default=decimal_default)
-                }
-            
-            elif path.startswith('/api/sensor/') or normalized_path.startswith('/api/sensor/') or path.startswith('/sensors/'):
-                device_id = path_params.get('id') or path.split('/')[-1]
-                sensor = get_sensor_by_id(device_id)
-                
-                if sensor:
-                    return {
-                        'statusCode': 200,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps(sensor, default=decimal_default)
-                    }
-                else:
-                    return {
-                        'statusCode': 404,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps({'error': 'Sensor not found'})
-                    }
-            
-            elif path == '/api/risk-map' or normalized_path == '/api/risk-map' or path == '/risk-map':
-                map_data = get_risk_map_data()
-                return {
-                    'statusCode': 200,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': json.dumps(map_data, default=decimal_default)
-                }
-            
-            elif path == '/api/model-health' or normalized_path == '/api/model-health' or path == '/model-health':
-                health = get_model_health()
-                return {
-                    'statusCode': 200,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': json.dumps(health, default=decimal_default)
-                }
-            
-            elif path == '/api/nasa-fires' or normalized_path == '/api/nasa-fires' or path == '/nasa-fires':
-                return get_nasa_data(event, context)
+        from inference.predict import model
+        return {'status': 'healthy', 'model_loaded': True}
+    except:
+        return {'status': 'degraded', 'model_loaded': False}
 
-            
-            else:
-                return {
-                    'statusCode': 404,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': json.dumps({'error': 'Not found', 'path': path, 'method': http_method})
-                }
-        
-        elif http_method == 'POST':
-            if path == '/api/risk-detailed' or normalized_path == '/api/risk-detailed' or path == '/risk-detailed':
-                try:
-                    payload = json.loads(event.get('body', '{}'))
-                    detailed = get_detailed_risk(payload)
-                    return {
-                        'statusCode': 200,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps(detailed, default=decimal_default)
-                    }
-                except json.JSONDecodeError:
-                    return {
-                        'statusCode': 400,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps({'error': 'Invalid JSON'})
-                    }
-            
-            else:
-                return {
-                    'statusCode': 404,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': json.dumps({'error': 'Not found', 'path': path, 'method': http_method})
-                }
-        
-        else:
-            return {
-                'statusCode': 405,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({'error': 'Method not allowed'})
-            }
-            
-    except Exception as e:
-        print(f"Error in API handler: {e}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({'error': str(e)})
-        }
+def get_nasa_fires():
+    """Get NASA FIRMS fire data"""
+    try:
+        from nasa_firms_service import get_nasa_fires as get_nasa
+        return get_nasa()
+    except:
+        return []
