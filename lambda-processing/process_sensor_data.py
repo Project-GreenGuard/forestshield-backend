@@ -9,12 +9,24 @@ This function:
 """
 
 import json
-import boto3
 import os
+import sys
+import boto3
 import requests
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any
+
+# Load the ForestShield AI inference module from the Lambda Layer / local path
+_AI_PATH = os.getenv('FORESTSHIELD_AI_PATH', '/opt/forestshield-ai')
+if _AI_PATH not in sys.path:
+    sys.path.insert(0, _AI_PATH)
+try:
+    from inference.predict import predict_risk as _ml_predict_risk  # type: ignore
+    _ML_AVAILABLE = True
+except Exception as _e:
+    print(f"[WARN] ML model unavailable, falling back to rule-based scoring: {_e}")
+    _ML_AVAILABLE = False
 
 # Initialize AWS clients - support both local and AWS DynamoDB
 dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
@@ -215,10 +227,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         fire_distance = fire_info.get('distance')
         print(f"Nearest fire distance: {fire_distance} km")
         
-        # Calculate risk score
+        # Calculate risk score — use ML model if available, else fall back to rule-based
         print("Calculating risk score...")
-        risk_score = calculate_risk_score(temperature, humidity, fire_distance)
-        print(f"Risk score: {risk_score}")
+        if _ML_AVAILABLE:
+            ml_result = _ml_predict_risk({
+                'temperature': temperature,
+                'humidity': humidity,
+                'lat': lat,
+                'lng': lng,
+                'nearestFireDistance': fire_distance,
+                'timestamp': timestamp
+            })
+            risk_score = ml_result['risk_score']
+            risk_level = ml_result['risk_level']
+            print(f"ML risk score: {risk_score} ({risk_level})")
+        else:
+            risk_score = calculate_risk_score(temperature, humidity, fire_distance)
+            risk_level = 'HIGH' if risk_score > 60 else ('MEDIUM' if risk_score > 30 else 'LOW')
+            print(f"Rule-based risk score: {risk_score} ({risk_level})")
         
         # Prepare DynamoDB item (convert floats to Decimals for DynamoDB compatibility)
         print("Preparing DynamoDB item...")
@@ -230,6 +256,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'lat': Decimal(str(lat)),
             'lng': Decimal(str(lng)),
             'riskScore': Decimal(str(risk_score)),
+            'riskLevel': risk_level,
             'nearestFireDistance': Decimal(str(fire_distance)) if fire_distance else Decimal('-1'),
             'nearestFireData': json.dumps(fire_info.get('fire_data')) if fire_info.get('fire_data') else None,
             'ttl': int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
@@ -246,6 +273,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'success': True,
                 'deviceId': device_id,
                 'riskScore': risk_score,
+                'riskLevel': risk_level,
                 'fireDistance': fire_distance
             })
         }
