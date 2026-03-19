@@ -77,6 +77,7 @@ def get_all_sensors():
                     'lng': float(item.get('lng', 0)) if isinstance(item.get('lng'), Decimal) else item.get('lng'),
                     'riskScore': float(item.get('riskScore', 0)) if isinstance(item.get('riskScore'), Decimal) else item.get('riskScore'),
                     'riskLevel': item.get('riskLevel', 'UNKNOWN'),
+                    'spreadRateKmh': float(item.get('spreadRateKmh', 0)) if isinstance(item.get('spreadRateKmh'), Decimal) else item.get('spreadRateKmh'),
                     'nearestFireDistance': float(item.get('nearestFireDistance', -1)) if isinstance(item.get('nearestFireDistance'), Decimal) else item.get('nearestFireDistance'),
                     'timestamp': timestamp
                 }
@@ -136,6 +137,7 @@ def get_risk_map_data():
                 'lng': item.get('lng'),
                 'riskScore': item.get('riskScore'),
                 'riskLevel': item.get('riskLevel', 'UNKNOWN'),
+                'spreadRateKmh': float(item.get('spreadRateKmh', 0)) if isinstance(item.get('spreadRateKmh'), Decimal) else item.get('spreadRateKmh'),
                 'temperature': item.get('temperature'),
                 'humidity': item.get('humidity'),
                 'nearestFireDistance': item.get('nearestFireDistance'),

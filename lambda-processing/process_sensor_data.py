@@ -22,7 +22,7 @@ _AI_PATH = os.getenv('FORESTSHIELD_AI_PATH', '/opt/forestshield-ai')
 if _AI_PATH not in sys.path:
     sys.path.insert(0, _AI_PATH)
 try:
-    from inference.predict import predict_risk as _ml_predict_risk  # type: ignore
+    from inference.predict import predict_risk as _ml_predict_risk, build_feature_vector as _ml_build_features  # type: ignore
     _ML_AVAILABLE = True
 except Exception as _e:
     print(f"[WARN] ML model unavailable, falling back to rule-based scoring: {_e}")
@@ -46,7 +46,7 @@ else:
 table = dynamodb.Table('WildfireSensorData')
 
 # NASA FIRMS API endpoint
-NASA_FIRMS_API = "https://firms.modaps.eosdis.nasa.gov/api/country/csv/{}/MODIS_NRT/1"
+NASA_FIRMS_API = "https://firms.modaps.eosdis.nasa.gov/api/country/csv/{673ef51ef9cbe48db95f09f8a71b5eeb}/MODIS_NRT/1"
 
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -152,6 +152,20 @@ def calculate_risk_score(temperature: float, humidity: float, fire_distance: flo
     return round(min(risk_score, 100.0), 2)
 
 
+def estimate_spread_rate(temperature: float, humidity: float, risk_score: float) -> float:
+    """
+    Estimate fire spread rate (km/h) as a heuristic derived from sensor inputs.
+    Higher temperature, lower humidity, and higher risk score all increase spread.
+    Output is clipped to [0.5, 12.0] km/h.
+    """
+    temp_factor     = min(max(temperature, 0.0), 50.0) / 50.0
+    humidity_factor = 1.0 - min(max(humidity, 0.0), 100.0) / 100.0
+    risk_factor     = min(max(risk_score,  0.0), 100.0) / 100.0
+
+    raw = 12.0 * (0.35 * temp_factor + 0.35 * humidity_factor + 0.30 * risk_factor)
+    return round(min(max(raw, 0.5), 12.0), 2)
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Main Lambda handler for processing IoT sensor data.
@@ -230,7 +244,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Calculate risk score — use ML model if available, else fall back to rule-based
         print("Calculating risk score...")
         if _ML_AVAILABLE:
-            ml_result = _ml_predict_risk({
+            ml_features = _ml_build_features({
                 'temperature': temperature,
                 'humidity': humidity,
                 'lat': lat,
@@ -238,6 +252,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'nearestFireDistance': fire_distance,
                 'timestamp': timestamp
             })
+            ml_result = _ml_predict_risk(ml_features)
             risk_score = ml_result['risk_score']
             risk_level = ml_result['risk_level']
             print(f"ML risk score: {risk_score} ({risk_level})")
@@ -245,7 +260,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             risk_score = calculate_risk_score(temperature, humidity, fire_distance)
             risk_level = 'HIGH' if risk_score > 60 else ('MEDIUM' if risk_score > 30 else 'LOW')
             print(f"Rule-based risk score: {risk_score} ({risk_level})")
-        
+
+        # Estimate fire spread rate from existing inputs (heuristic, no new model)
+        spread_rate_kmh = estimate_spread_rate(temperature, humidity, risk_score)
+        print(f"Estimated spread rate: {spread_rate_kmh} km/h")
+
         # Prepare DynamoDB item (convert floats to Decimals for DynamoDB compatibility)
         print("Preparing DynamoDB item...")
         dynamodb_item = {
@@ -257,6 +276,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'lng': Decimal(str(lng)),
             'riskScore': Decimal(str(risk_score)),
             'riskLevel': risk_level,
+            'spreadRateKmh': Decimal(str(spread_rate_kmh)),
             'nearestFireDistance': Decimal(str(fire_distance)) if fire_distance else Decimal('-1'),
             'nearestFireData': json.dumps(fire_info.get('fire_data')) if fire_info.get('fire_data') else None,
             'ttl': int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
@@ -274,6 +294,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'deviceId': device_id,
                 'riskScore': risk_score,
                 'riskLevel': risk_level,
+                'spreadRateKmh': spread_rate_kmh,
                 'fireDistance': fire_distance
             })
         }

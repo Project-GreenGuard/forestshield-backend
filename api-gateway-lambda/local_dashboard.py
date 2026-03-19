@@ -3,6 +3,11 @@ Local Flask server for development.
 Simulates API Gateway + Lambda for local frontend development.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lambda-processing'))
+sys.path.insert(0, '/app/lambda-processing')
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
@@ -12,6 +17,7 @@ from nasa_firms_service import get_nasa_fires
 
 # Import API handler functions
 from api_handler import get_all_sensors, get_sensor_by_id, get_risk_map_data
+from process_sensor_data import lambda_handler as process_sensor  # type: ignore
 
 app = Flask(__name__)
 CORS(app)
@@ -26,7 +32,36 @@ dynamodb = boto3.resource(
     region_name='us-east-1'
 )
 
-# The api_handler will use the environment variables we set above
+
+#def ensure_table_exists():
+ #   """Create WildfireSensorData table if it doesn't exist (local dev only)."""
+  #  try:
+   #     dynamodb.meta.client.describe_table(TableName='WildfireSensorData')
+   # except dynamodb.meta.client.exceptions.ResourceNotFoundException:
+    #    print("Creating WildfireSensorData table...")
+     #   dynamodb.create_table(
+      #      TableName='WildfireSensorData',
+       #     KeySchema=[
+        #        {'AttributeName': 'deviceId', 'KeyType': 'HASH'},
+         #       {'AttributeName': 'timestamp', 'KeyType': 'RANGE'},
+          #  ],
+           # AttributeDefinitions=[
+            #    {'AttributeName': 'deviceId', 'AttributeType': 'S'},
+             #   {'AttributeName': 'timestamp', 'AttributeType': 'S'},
+        #    ],
+         #   BillingMode='PAY_PER_REQUEST',
+       # )
+      #  print("Table created.")
+
+
+#ensure_table_exists()
+
+@app.route('/api/temperature', methods=['POST'])
+def api_temperature():
+    """Ingest sensor data — simulates IoT Core → Lambda pipeline for local testing."""
+    payload = request.get_json(force=True)
+    result = process_sensor(payload, None)
+    return jsonify(result.get('body', result)), result.get('statusCode', 200)
 
 @app.route('/api/sensors', methods=['GET'])
 def api_sensors():
