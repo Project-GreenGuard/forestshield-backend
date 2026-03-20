@@ -45,8 +45,9 @@ else:
 
 table = dynamodb.Table('WildfireSensorData')
 
-# NASA FIRMS API endpoint
-NASA_FIRMS_API = "https://firms.modaps.eosdis.nasa.gov/api/country/csv/{673ef51ef9cbe48db95f09f8a71b5eeb}/MODIS_NRT/1"
+# NASA FIRMS API endpoint (requires NASA_MAP_KEY env var)
+NASA_FIRMS_API = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{NASA_MAP_KEY=673ef51ef9cbe48db95f09f8a71b5eeb}/MODIS_NRT/{bbox}/1"
+_ONTARIO_BBOX = "-95.5,41.5,-74.0,56.9"
 
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -71,8 +72,12 @@ def fetch_nasa_firms_data(country_code: str = "CAN") -> list:
     Fetch active wildfire data from NASA FIRMS API.
     Returns list of fire points with lat/lng coordinates.
     """
+    api_key = os.getenv("NASA_MAP_KEY")
+    if not api_key:
+        print("Warning: NASA_MAP_KEY not set. Skipping FIRMS fetch.")
+        return []
     try:
-        url = NASA_FIRMS_API.format(country_code)
+        url = NASA_FIRMS_API.format(key=api_key, bbox=_ONTARIO_BBOX)
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         

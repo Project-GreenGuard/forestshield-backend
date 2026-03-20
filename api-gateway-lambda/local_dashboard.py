@@ -33,35 +33,16 @@ dynamodb = boto3.resource(
 )
 
 
-#def ensure_table_exists():
- #   """Create WildfireSensorData table if it doesn't exist (local dev only)."""
-  #  try:
-   #     dynamodb.meta.client.describe_table(TableName='WildfireSensorData')
-   # except dynamodb.meta.client.exceptions.ResourceNotFoundException:
-    #    print("Creating WildfireSensorData table...")
-     #   dynamodb.create_table(
-      #      TableName='WildfireSensorData',
-       #     KeySchema=[
-        #        {'AttributeName': 'deviceId', 'KeyType': 'HASH'},
-         #       {'AttributeName': 'timestamp', 'KeyType': 'RANGE'},
-          #  ],
-           # AttributeDefinitions=[
-            #    {'AttributeName': 'deviceId', 'AttributeType': 'S'},
-             #   {'AttributeName': 'timestamp', 'AttributeType': 'S'},
-        #    ],
-         #   BillingMode='PAY_PER_REQUEST',
-       # )
-      #  print("Table created.")
-
-
-#ensure_table_exists()
-
 @app.route('/api/temperature', methods=['POST'])
 def api_temperature():
     """Ingest sensor data — simulates IoT Core → Lambda pipeline for local testing."""
+    import json as _json
     payload = request.get_json(force=True)
     result = process_sensor(payload, None)
-    return jsonify(result.get('body', result)), result.get('statusCode', 200)
+    body = result.get('body', result)
+    if isinstance(body, str):
+        body = _json.loads(body)
+    return jsonify(body), result.get('statusCode', 200)
 
 @app.route('/api/sensors', methods=['GET'])
 def api_sensors():
