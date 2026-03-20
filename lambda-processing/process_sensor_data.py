@@ -10,23 +10,67 @@ This function:
 
 import json
 import os
-import sys
 import boto3
 import requests
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any
+from gradio_client import Client
 
-# Load the ForestShield AI inference module from the Lambda Layer / local path
-_AI_PATH = os.getenv('FORESTSHIELD_AI_PATH', '/opt/forestshield-ai')
-if _AI_PATH not in sys.path:
-    sys.path.insert(0, _AI_PATH)
-try:
-    from inference.predict import predict_risk as _ml_predict_risk, build_feature_vector as _ml_build_features  # type: ignore
-    _ML_AVAILABLE = True
-except Exception as _e:
-    print(f"[WARN] ML model unavailable, falling back to rule-based scoring: {_e}")
-    _ML_AVAILABLE = False
+HF_SPACE_ID = os.getenv("HF_SPACE_ID", "parvesam/forestshield-wildfire-risk")
+
+def call_hf_space_predict(
+    temperature: float,
+    humidity: float,
+    lat: float,
+    lng: float,
+    nearest_fire_dist,
+    timestamp: str
+):
+    """
+    Call the Hugging Face Gradio Space using gradio_client.
+    Returns (risk_score, risk_level, spread_rate_kmh).
+    """
+    try:
+        ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        month = ts.month
+        hour = ts.hour
+    except Exception:
+        now = datetime.utcnow()
+        month = now.month
+        hour = now.hour
+
+    dist = float(nearest_fire_dist) if nearest_fire_dist is not None else 100.0
+
+    client = Client(HF_SPACE_ID)
+
+    result = client.predict(
+        temperature=temperature,
+        humidity=humidity,
+        lat=lat,
+        lng=lng,
+        nearest_fire_dist=dist,
+        month=month,
+        hour=hour,
+        api_name="/predict",
+    )
+
+    # result should be:
+    # [ "38.1 / 100", "🟠  MEDIUM", "6.1 km/h", "v..." ]
+
+    risk_score = float(str(result[0]).split("/")[0].strip())
+
+    raw_level = str(result[1]).upper()
+    if "HIGH" in raw_level:
+        risk_level = "HIGH"
+    elif "MEDIUM" in raw_level:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+
+    spread_rate_kmh = float(str(result[2]).replace("km/h", "").strip())
+
+    return risk_score, risk_level, spread_rate_kmh
 
 # Initialize AWS clients - support both local and AWS DynamoDB
 dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
@@ -46,7 +90,7 @@ else:
 table = dynamodb.Table('WildfireSensorData')
 
 # NASA FIRMS API endpoint (requires NASA_MAP_KEY env var)
-NASA_FIRMS_API = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{NASA_MAP_KEY=673ef51ef9cbe48db95f09f8a71b5eeb}/MODIS_NRT/{bbox}/1"
+NASA_FIRMS_API = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/MODIS_NRT/{bbox}/1"
 _ONTARIO_BBOX = "-95.5,41.5,-74.0,56.9"
 
 
@@ -246,28 +290,20 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         fire_distance = fire_info.get('distance')
         print(f"Nearest fire distance: {fire_distance} km")
         
-        # Calculate risk score — use ML model if available, else fall back to rule-based
-        print("Calculating risk score...")
-        if _ML_AVAILABLE:
-            ml_features = _ml_build_features({
-                'temperature': temperature,
-                'humidity': humidity,
-                'lat': lat,
-                'lng': lng,
-                'nearestFireDistance': fire_distance,
-                'timestamp': timestamp
-            })
-            ml_result = _ml_predict_risk(ml_features)
-            risk_score = ml_result['risk_score']
-            risk_level = ml_result['risk_level']
-            print(f"ML risk score: {risk_score} ({risk_level})")
-        else:
+        # Calculate risk score — call HF Space API, fall back to rule-based if unavailable
+        print("Calculating risk score via HF Space...")
+        try:
+            risk_score, risk_level, spread_rate_kmh = call_hf_space_predict(
+                temperature, humidity, lat, lng, fire_distance, timestamp
+            )
+            print(f"HF Space prediction: {risk_score} ({risk_level}), spread: {spread_rate_kmh} km/h")
+        except Exception as hf_err:
+            print(f"[WARN] HF Space unavailable, using rule-based fallback: {hf_err}")
             risk_score = calculate_risk_score(temperature, humidity, fire_distance)
             risk_level = 'HIGH' if risk_score > 60 else ('MEDIUM' if risk_score > 30 else 'LOW')
+            spread_rate_kmh = estimate_spread_rate(temperature, humidity, risk_score)
             print(f"Rule-based risk score: {risk_score} ({risk_level})")
 
-        # Estimate fire spread rate from existing inputs (heuristic, no new model)
-        spread_rate_kmh = estimate_spread_rate(temperature, humidity, risk_score)
         print(f"Estimated spread rate: {spread_rate_kmh} km/h")
 
         # Prepare DynamoDB item (convert floats to Decimals for DynamoDB compatibility)

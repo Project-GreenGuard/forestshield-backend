@@ -32,6 +32,28 @@ dynamodb = boto3.resource(
     region_name='us-east-1'
 )
 
+def ensure_table_exists():
+    """Create WildfireSensorData table if it doesn't exist (local dev only)."""
+    try:
+        dynamodb.meta.client.describe_table(TableName='WildfireSensorData')
+    except dynamodb.meta.client.exceptions.ResourceNotFoundException:
+        print("Creating WildfireSensorData table...")
+        dynamodb.create_table(
+            TableName='WildfireSensorData',
+            KeySchema=[
+                {'AttributeName': 'deviceId', 'KeyType': 'HASH'},
+                {'AttributeName': 'timestamp', 'KeyType': 'RANGE'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'deviceId', 'AttributeType': 'S'},
+                {'AttributeName': 'timestamp', 'AttributeType': 'S'},
+            ],
+            BillingMode='PAY_PER_REQUEST',
+        )
+        print("Table created.")
+
+
+ensure_table_exists()
 
 @app.route('/api/temperature', methods=['POST'])
 def api_temperature():
