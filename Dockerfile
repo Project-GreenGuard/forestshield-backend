@@ -7,7 +7,8 @@ WORKDIR /app
 
 # Install dependencies
 COPY api-gateway-lambda/requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt flask flask-cors requests
+COPY lambda-processing/requirements.txt /app/lambda-processing-requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt -r lambda-processing-requirements.txt flask flask-cors requests
 
 # Copy application code
 COPY api-gateway-lambda/ /app/

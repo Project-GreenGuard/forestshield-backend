@@ -11,8 +11,12 @@ services:
       - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://dynamodb:8000}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-local}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-local}
+      - FORESTSHIELD_AI_PATH=/opt/forestshield-ai
+      - NASA_MAP_KEY=673ef51ef9cbe48db95f09f8a71b5eeb
     volumes:
       - ./api-gateway-lambda:/app
+      - ./lambda-processing:/app/lambda-processing
+      - ../forestshield-ai:/opt/forestshield-ai
     depends_on:
       - dynamodb
     networks:
