@@ -4,8 +4,8 @@ AWS Lambda function to process IoT sensor data from AWS IoT Core.
 This function:
 1. Receives MQTT messages from IoT Core
 2. Fetches NASA FIRMS wildfire data
-3. Computes risk score
-4. Stores enriched data in DynamoDB
+3. Computes risk (optional GCP Cloud Run ML inference, else rule-based fallback)
+4. Stores enriched data in DynamoDB (riskLevel, spreadRateKmh, etc.)
 """
 
 import json
@@ -14,249 +14,292 @@ import os
 import requests
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 
 # Initialize AWS clients - support both local and AWS DynamoDB
-dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
+dynamodb_endpoint = os.getenv("AWS_ENDPOINT_URL")
 if dynamodb_endpoint:
-    # Local development
     dynamodb = boto3.resource(
-        'dynamodb',
+        "dynamodb",
         endpoint_url=dynamodb_endpoint,
-        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'local'),
-        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'local'),
-        region_name='us-east-1'
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID", "local"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY", "local"),
+        region_name="us-east-1",
     )
 else:
-    # AWS production
-    dynamodb = boto3.resource('dynamodb')
+    dynamodb = boto3.resource("dynamodb")
 
-table = dynamodb.Table('WildfireSensorData')
+table = dynamodb.Table(os.getenv("DYNAMODB_TABLE", "WildfireSensorData"))
 
-# NASA FIRMS API endpoint
-NASA_FIRMS_API = "https://firms.modaps.eosdis.nasa.gov/api/country/csv/{}/MODIS_NRT/1"
+# NASA FIRMS: area API needs MAP key; country CSV works without (broader bbox)
+NASA_FIRMS_AREA = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/MODIS_NRT/{bbox}/1"
+NASA_FIRMS_COUNTRY = "https://firms.modaps.eosdis.nasa.gov/api/country/csv/{}/MODIS_NRT/1"
+_ONTARIO_BBOX = "-95.5,41.5,-74.0,56.9"
+
+# Full URL to POST JSON (e.g. https://your-service.run.app/predict). If unset, rule-based only.
+CLOUD_RUN_PREDICT_URL = os.getenv("CLOUD_RUN_PREDICT_URL", "").strip()
+
+
+def _cloud_run_timeout_sec() -> float:
+    """Read on each call so Lambda env updates apply without cold start."""
+    return float(os.getenv("CLOUD_RUN_TIMEOUT_SEC", "8"))
 
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate distance between two coordinates using Haversine formula."""
+    """Haversine distance in km."""
     from math import radians, cos, sin, asin, sqrt
-    
-    # Convert to radians
+
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    
-    # Haversine formula
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
     c = 2 * asin(sqrt(a))
-    r = 6371  # Earth radius in km
-    
-    return c * r
+    return c * 6371
 
 
 def fetch_nasa_firms_data(country_code: str = "CAN") -> list:
     """
-    Fetch active wildfire data from NASA FIRMS API.
-    Returns list of fire points with lat/lng coordinates.
+    Prefer NASA area CSV when NASA_MAP_KEY is set (Ontario bbox); else country CSV.
     """
+    api_key = os.getenv("NASA_MAP_KEY", "").strip()
+    if api_key:
+        try:
+            url = NASA_FIRMS_AREA.format(map_key=api_key, bbox=_ONTARIO_BBOX)
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return _parse_firms_csv(response.text)
+        except Exception as e:
+            print(f"[WARN] NASA area FIRMS failed ({e}), falling back to country CSV")
+
     try:
-        url = NASA_FIRMS_API.format(country_code)
+        url = NASA_FIRMS_COUNTRY.format(country_code)
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        
-        # Parse CSV response
-        lines = response.text.strip().split('\n')
-        if len(lines) < 2:
-            return []
-        
-        fires = []
-        headers = lines[0].split(',')
-        
-        for line in lines[1:]:
-            values = line.split(',')
-            if len(values) >= len(headers):
-                fire_point = {}
-                for i, header in enumerate(headers):
-                    fire_point[header.strip()] = values[i].strip() if i < len(values) else ''
-                fires.append(fire_point)
-        
-        return fires
+        return _parse_firms_csv(response.text)
     except Exception as e:
         print(f"Error fetching NASA FIRMS data: {e}")
         return []
 
 
+def _parse_firms_csv(text: str) -> list:
+    lines = text.strip().split("\n")
+    if len(lines) < 2:
+        return []
+    fires = []
+    headers = lines[0].split(",")
+    for line in lines[1:]:
+        values = line.split(",")
+        if len(values) >= len(headers):
+            fire_point = {}
+            for i, header in enumerate(headers):
+                fire_point[header.strip()] = values[i].strip() if i < len(values) else ""
+            fires.append(fire_point)
+    return fires
+
+
 def find_nearest_fire(sensor_lat: float, sensor_lng: float, fires: list) -> Dict[str, Any]:
-    """Find the nearest fire to the sensor location."""
     if not fires:
         return {"distance": None, "fire_data": None}
-    
-    min_distance = float('inf')
+
+    min_distance = float("inf")
     nearest_fire = None
-    
+
     for fire in fires:
         try:
-            fire_lat = float(fire.get('latitude', 0))
-            fire_lng = float(fire.get('longitude', 0))
+            fire_lat = float(fire.get("latitude", 0))
+            fire_lng = float(fire.get("longitude", 0))
             distance = calculate_distance(sensor_lat, sensor_lng, fire_lat, fire_lng)
-            
             if distance < min_distance:
                 min_distance = distance
                 nearest_fire = fire
         except (ValueError, KeyError):
             continue
-    
+
     return {
         "distance": round(min_distance, 2) if nearest_fire else None,
-        "fire_data": nearest_fire
+        "fire_data": nearest_fire,
     }
 
 
-def calculate_risk_score(temperature: float, humidity: float, fire_distance: float = None) -> float:
-    """
-    Simple risk scoring algorithm.
-    risk = w1*temperature + w2*(1/humidity) + w3*(1/distance_to_fire)
-    """
-    w1 = 0.4  # Temperature weight
-    w2 = 0.3  # Humidity weight
-    w3 = 0.3  # Fire proximity weight
-    
-    # Normalize temperature (0-50°C range)
+def calculate_risk_score(temperature: float, humidity: float, fire_distance: Optional[float] = None) -> float:
+    w1, w2, w3 = 0.4, 0.3, 0.3
     temp_score = min(temperature / 50.0, 1.0) * 100
-    
-    # Inverse humidity (lower humidity = higher risk)
     humidity_score = (1.0 - min(humidity / 100.0, 1.0)) * 100
-    
-    # Fire proximity score
     if fire_distance is not None and fire_distance > 0:
-        # Closer fire = higher risk (inverse relationship)
-        # Normalize: 0-100km range
         fire_score = max(0, (100 - min(fire_distance, 100)) / 100.0) * 100
     else:
         fire_score = 0
-    
     risk_score = (w1 * temp_score) + (w2 * humidity_score) + (w3 * fire_score)
-    
     return round(min(risk_score, 100.0), 2)
 
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+def risk_level_from_score(score: float) -> str:
+    if score > 60:
+        return "HIGH"
+    if score > 30:
+        return "MEDIUM"
+    return "LOW"
+
+
+def estimate_spread_rate_kmh(temperature: float, humidity: float, risk_score: float) -> float:
+    """Heuristic when Cloud Run is unavailable (aligned with PR #9 scale ~0.5–12 km/h)."""
+    temp_factor = min(max(temperature, 0.0), 50.0) / 50.0
+    humidity_factor = 1.0 - min(max(humidity, 0.0), 100.0) / 100.0
+    risk_factor = min(max(risk_score, 0.0), 100.0) / 100.0
+    raw = 12.0 * (0.35 * temp_factor + 0.35 * humidity_factor + 0.30 * risk_factor)
+    return round(min(max(raw, 0.5), 12.0), 2)
+
+
+def call_cloud_run_predict(
+    temperature: float,
+    humidity: float,
+    lat: float,
+    lng: float,
+    nearest_fire_dist: Optional[float],
+    timestamp: str,
+) -> Tuple[float, str, float]:
     """
-    Main Lambda handler for processing IoT sensor data.
-    
-    AWS IoT Core sends events in this format:
-    {
-        "deviceId": "esp32-01",
-        "temperature": 23.4,
-        "humidity": 40.2,
-        "lat": 43.467,
-        "lng": -79.699,
-        "timestamp": "2025-12-01T16:20:00Z"
+    POST to Cloud Run predict endpoint. Response keys: risk_score, risk_level, spread_rate
+    (snake_case) or camelCase equivalents.
+    """
+    if not CLOUD_RUN_PREDICT_URL:
+        raise RuntimeError("CLOUD_RUN_PREDICT_URL not set")
+
+    nearest_payload = 100.0
+    if nearest_fire_dist is not None and nearest_fire_dist >= 0:
+        nearest_payload = float(nearest_fire_dist)
+
+    payload = {
+        "temperature": temperature,
+        "humidity": humidity,
+        "lat": lat,
+        "lng": lng,
+        "nearestFireDistance": nearest_payload,
+        "timestamp": timestamp,
     }
-    
-    The IoT Core rule uses: SELECT * FROM 'wildfire/sensors/+'
-    which passes the message payload directly.
-    """
+
+    response = requests.post(
+        CLOUD_RUN_PREDICT_URL,
+        json=payload,
+        timeout=_cloud_run_timeout_sec(),
+        headers={"Content-Type": "application/json"},
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    score = float(data.get("risk_score", data.get("riskScore")))
+    level_raw = data.get("risk_level", data.get("riskLevel", ""))
+    spread = float(data.get("spread_rate", data.get("spreadRateKmh", 0)))
+
+    level = str(level_raw).strip().upper() if level_raw else ""
+    if level not in ("LOW", "MEDIUM", "HIGH"):
+        level = risk_level_from_score(score)
+
+    return score, level, spread
+
+
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
-        # Debug: Log the incoming event structure
         print(f"Received event: {json.dumps(event)}")
-        
-        # Parse IoT payload - IoT Core SQL SELECT * returns the message payload directly
-        # But sometimes it's wrapped in additional fields
+
         payload = None
-        
-        # Try different event structures
-        if 'deviceId' in event and 'temperature' in event:
-            # Direct payload structure
+        if "deviceId" in event and "temperature" in event:
             payload = event
-        elif 'temperature' in event:
-            # Payload might be at root level
+        elif "temperature" in event:
             payload = event
-        elif 'body' in event:
-            # Wrapped in body (API Gateway style, but handle it)
-            if isinstance(event['body'], str):
-                payload = json.loads(event['body'])
+        elif "body" in event:
+            if isinstance(event["body"], str):
+                payload = json.loads(event["body"])
             else:
-                payload = event['body']
+                payload = event["body"]
         else:
-            # Default: use event as payload
             payload = event
-        
+
         if not payload:
             print(f"ERROR: Could not parse payload from event: {event}")
-            return {'statusCode': 400, 'body': json.dumps({'error': 'Invalid event structure'})}
-        
+            return {"statusCode": 400, "body": json.dumps({"error": "Invalid event structure"})}
+
         print(f"Parsed payload: {json.dumps(payload)}")
-        
-        device_id = payload.get('deviceId')
-        temperature = float(payload.get('temperature', 0))
-        humidity = float(payload.get('humidity', 0))
-        lat = float(payload.get('lat', 0))
-        lng = float(payload.get('lng', 0))
-        timestamp = payload.get('timestamp', datetime.utcnow().isoformat() + 'Z')
-        
-        print(f"Extracted values - deviceId: {device_id}, temp: {temperature}, humidity: {humidity}, lat: {lat}, lng: {lng}, timestamp: {timestamp}")
-        
-        # Validate required fields
+
+        device_id = payload.get("deviceId")
+        temperature = float(payload.get("temperature", 0))
+        humidity = float(payload.get("humidity", 0))
+        lat = float(payload.get("lat", 0))
+        lng = float(payload.get("lng", 0))
+        timestamp = payload.get("timestamp", datetime.utcnow().isoformat() + "Z")
+
         if not device_id:
             print(f"ERROR: deviceId is missing from payload: {payload}")
-            return {'statusCode': 400, 'body': json.dumps({'error': 'deviceId is required'})}
-        
+            return {"statusCode": 400, "body": json.dumps({"error": "deviceId is required"})}
+
         print(f"Processing sensor data for device: {device_id}")
-        
-        # Fetch NASA FIRMS wildfire data
+
         print("Fetching NASA FIRMS wildfire data...")
-        fires = fetch_nasa_firms_data("CAN")  # Canada for now, can be parameterized
-        print(f"Found {len(fires)} active fires")
-        
-        # Find nearest fire
-        print("Finding nearest fire...")
+        fires = fetch_nasa_firms_data("CAN")
+        print(f"Found {len(fires)} active fire rows")
+
         fire_info = find_nearest_fire(lat, lng, fires)
-        fire_distance = fire_info.get('distance')
+        fire_distance = fire_info.get("distance")
         print(f"Nearest fire distance: {fire_distance} km")
-        
-        # Calculate risk score
-        print("Calculating risk score...")
-        risk_score = calculate_risk_score(temperature, humidity, fire_distance)
-        print(f"Risk score: {risk_score}")
-        
-        # Prepare DynamoDB item (convert floats to Decimals for DynamoDB compatibility)
-        print("Preparing DynamoDB item...")
+
+        risk_score: float
+        risk_level: str
+        spread_rate_kmh: float
+
+        if CLOUD_RUN_PREDICT_URL:
+            print(f"Calling Cloud Run: {CLOUD_RUN_PREDICT_URL}")
+            try:
+                risk_score, risk_level, spread_rate_kmh = call_cloud_run_predict(
+                    temperature, humidity, lat, lng, fire_distance, timestamp
+                )
+                print(f"Cloud Run: score={risk_score}, level={risk_level}, spread={spread_rate_kmh}")
+            except Exception as err:
+                print(f"[WARN] Cloud Run unavailable, rule-based fallback: {err}")
+                risk_score = calculate_risk_score(temperature, humidity, fire_distance)
+                risk_level = risk_level_from_score(risk_score)
+                spread_rate_kmh = estimate_spread_rate_kmh(temperature, humidity, risk_score)
+        else:
+            print("CLOUD_RUN_PREDICT_URL unset; using rule-based scoring only")
+            risk_score = calculate_risk_score(temperature, humidity, fire_distance)
+            risk_level = risk_level_from_score(risk_score)
+            spread_rate_kmh = estimate_spread_rate_kmh(temperature, humidity, risk_score)
+
         dynamodb_item = {
-            'deviceId': device_id,
-            'timestamp': timestamp,
-            'temperature': Decimal(str(temperature)),
-            'humidity': Decimal(str(humidity)),
-            'lat': Decimal(str(lat)),
-            'lng': Decimal(str(lng)),
-            'riskScore': Decimal(str(risk_score)),
-            'nearestFireDistance': Decimal(str(fire_distance)) if fire_distance else Decimal('-1'),
-            'nearestFireData': json.dumps(fire_info.get('fire_data')) if fire_info.get('fire_data') else None,
-            'ttl': int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
+            "deviceId": device_id,
+            "timestamp": timestamp,
+            "temperature": Decimal(str(temperature)),
+            "humidity": Decimal(str(humidity)),
+            "lat": Decimal(str(lat)),
+            "lng": Decimal(str(lng)),
+            "riskScore": Decimal(str(risk_score)),
+            "riskLevel": risk_level,
+            "spreadRateKmh": Decimal(str(spread_rate_kmh)),
+            "nearestFireDistance": Decimal(str(fire_distance)) if fire_distance else Decimal("-1"),
+            "nearestFireData": json.dumps(fire_info.get("fire_data")) if fire_info.get("fire_data") else None,
+            "ttl": int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60),
         }
-        
-        # Write to DynamoDB
+
         print(f"Writing to DynamoDB table: {table.name}")
         table.put_item(Item=dynamodb_item)
         print("Successfully wrote to DynamoDB")
-        
+
         return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'success': True,
-                'deviceId': device_id,
-                'riskScore': risk_score,
-                'fireDistance': fire_distance
-            })
-        }
-        
-    except Exception as e:
-        print(f"Error processing sensor data: {e}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps({
-                'success': False,
-                'error': str(e)
-            })
+            "statusCode": 200,
+            "body": json.dumps(
+                {
+                    "success": True,
+                    "deviceId": device_id,
+                    "riskScore": risk_score,
+                    "riskLevel": risk_level,
+                    "spreadRateKmh": spread_rate_kmh,
+                    "fireDistance": fire_distance,
+                }
+            ),
         }
 
+    except Exception as e:
+        print(f"Error processing sensor data: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return {"statusCode": 500, "body": json.dumps({"success": False, "error": str(e)})}

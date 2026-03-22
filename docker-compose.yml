@@ -1,5 +1,4 @@
 services:
-  # Local API server (simulates API Gateway + Lambda)
   api:
     build: .
     ports:
@@ -11,14 +10,18 @@ services:
       - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://dynamodb:8000}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-local}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-local}
+      - DYNAMODB_TABLE=${DYNAMODB_TABLE:-WildfireSensorData}
+      - NASA_MAP_KEY=${NASA_MAP_KEY:-}
+      - CLOUD_RUN_PREDICT_URL=${CLOUD_RUN_PREDICT_URL:-}
+      - CLOUD_RUN_TIMEOUT_SEC=${CLOUD_RUN_TIMEOUT_SEC:-8}
     volumes:
       - ./api-gateway-lambda:/app
+      - ./lambda-processing:/app/lambda-processing
     depends_on:
       - dynamodb
     networks:
       - wildfire-network
 
-  # DynamoDB Local for development
   dynamodb:
     image: amazon/dynamodb-local:latest
     ports:
@@ -29,7 +32,6 @@ services:
     networks:
       - wildfire-network
 
-  # Optional: Local MQTT broker for testing (Mosquitto)
   mqtt:
     image: eclipse-mosquitto:latest
     ports:
@@ -46,4 +48,3 @@ volumes:
 networks:
   wildfire-network:
     driver: bridge
-

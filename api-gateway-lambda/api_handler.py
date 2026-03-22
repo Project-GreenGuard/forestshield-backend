@@ -10,10 +10,11 @@ Endpoints:
 import json
 import boto3
 import os
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Key, Attr
 from datetime import datetime, timedelta
 from decimal import Decimal
 from nasa_firms_service import get_nasa_fires
+from sensor_enrichment import merge_sensor_public_fields
 
 
 # Support both local and AWS DynamoDB
@@ -31,7 +32,7 @@ else:
     # AWS production
     dynamodb = boto3.resource('dynamodb')
 
-table = dynamodb.Table('WildfireSensorData')
+table = dynamodb.Table(os.getenv('DYNAMODB_TABLE', 'WildfireSensorData'))
 
 
 def decimal_default(obj):
@@ -69,18 +70,30 @@ def get_all_sensors():
             
             # Compare timestamps (ISO format strings compare correctly)
             if device_id not in sensors or timestamp > sensors[device_id]['timestamp']:
+                def _f(v, default=None):
+                    if v is None:
+                        return default
+                    if isinstance(v, Decimal):
+                        return float(v)
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return v
+
                 sensors[device_id] = {
                     'deviceId': device_id,
-                    'temperature': float(item.get('temperature', 0)) if isinstance(item.get('temperature'), Decimal) else item.get('temperature'),
-                    'humidity': float(item.get('humidity', 0)) if isinstance(item.get('humidity'), Decimal) else item.get('humidity'),
-                    'lat': float(item.get('lat', 0)) if isinstance(item.get('lat'), Decimal) else item.get('lat'),
-                    'lng': float(item.get('lng', 0)) if isinstance(item.get('lng'), Decimal) else item.get('lng'),
-                    'riskScore': float(item.get('riskScore', 0)) if isinstance(item.get('riskScore'), Decimal) else item.get('riskScore'),
-                    'nearestFireDistance': float(item.get('nearestFireDistance', -1)) if isinstance(item.get('nearestFireDistance'), Decimal) else item.get('nearestFireDistance'),
-                    'timestamp': timestamp
+                    'temperature': _f(item.get('temperature'), 0),
+                    'humidity': _f(item.get('humidity'), 0),
+                    'lat': _f(item.get('lat'), 0),
+                    'lng': _f(item.get('lng'), 0),
+                    'riskScore': _f(item.get('riskScore'), 0),
+                    'nearestFireDistance': _f(item.get('nearestFireDistance'), -1),
+                    'timestamp': timestamp,
+                    'riskLevel': item.get('riskLevel'),
+                    'spreadRateKmh': _f(item.get('spreadRateKmh'), None) if item.get('spreadRateKmh') is not None else None,
                 }
-        
-        return list(sensors.values())
+
+        return [merge_sensor_public_fields(s) for s in sensors.values()]
     except Exception as e:
         print(f"Error getting sensors: {e}")
         import traceback
@@ -107,7 +120,7 @@ def get_sensor_by_id(device_id: str):
                     result[key] = float(value)
                 else:
                     result[key] = value
-            return result
+            return merge_sensor_public_fields(result)
         return None
     except Exception as e:
         print(f"Error getting sensor {device_id}: {e}")
@@ -117,29 +130,48 @@ def get_sensor_by_id(device_id: str):
 def get_risk_map_data():
     """Get risk map data for visualization (last 24 hours)."""
     try:
-        # Get data from last 24 hours
+        # Get data from last 24 hours (timestamp is not the partition key — use Attr, not Key)
         cutoff_time = (datetime.utcnow() - timedelta(hours=24)).isoformat() + 'Z'
-        
-        response = table.scan(
-            FilterExpression=Key('timestamp').gte(cutoff_time)
-        )
-        
-        items = response.get('Items', [])
-        
-        # Format for map visualization
+        items = []
+        last_key = None
+        while True:
+            kwargs = {'FilterExpression': Attr('timestamp').gte(cutoff_time)}
+            if last_key:
+                kwargs['ExclusiveStartKey'] = last_key
+            response = table.scan(**kwargs)
+            items.extend(response.get('Items', []))
+            last_key = response.get('LastEvaluatedKey')
+            if not last_key:
+                break
+
+        def _f(v, default=None):
+            if v is None:
+                return default
+            if isinstance(v, Decimal):
+                return float(v)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return v
+
         map_data = []
         for item in items:
-            map_data.append({
+            rs = item.get('riskScore')
+            nf = item.get('nearestFireDistance')
+            row = {
                 'deviceId': item['deviceId'],
                 'lat': item.get('lat'),
                 'lng': item.get('lng'),
-                'riskScore': item.get('riskScore'),
+                'riskScore': rs,
                 'temperature': item.get('temperature'),
                 'humidity': item.get('humidity'),
-                'nearestFireDistance': item.get('nearestFireDistance'),
-                'timestamp': item.get('timestamp')
-            })
-        
+                'nearestFireDistance': nf,
+                'timestamp': item.get('timestamp'),
+                'riskLevel': item.get('riskLevel'),
+                'spreadRateKmh': _f(item.get('spreadRateKmh'), None) if item.get('spreadRateKmh') is not None else None,
+            }
+            map_data.append(merge_sensor_public_fields(row))
+
         return map_data
     except Exception as e:
         print(f"Error getting risk map data: {e}")

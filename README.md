@@ -14,9 +14,14 @@ This repository contains:
 
 ```
 ESP32 → AWS IoT Core → Lambda (process_sensor_data) → DynamoDB
+                         │              ↑
+                         └── optional: GCP Cloud Run /predict (HTTPS)
                                                               ↓
-API Gateway → Lambda (api_handler) ← Frontend Dashboard
+API Gateway → Lambda (api_handler) ← Frontend Dashboard (never calls Cloud Run directly)
 ```
+
+- **`CLOUD_RUN_PREDICT_URL`**: full URL for `POST` JSON predict (e.g. `https://….run.app/predict`). If unset, processing uses **rule-based** risk + local spread heuristic only.
+- **Dashboard** uses only **`REACT_APP_API_URL`** (API Gateway / local Flask). It reads **`riskLevel`** and **`spreadRateKmh`** from DynamoDB (written by the processing Lambda).
 
 ## Components
 
@@ -25,9 +30,9 @@ API Gateway → Lambda (api_handler) ← Frontend Dashboard
 #### 1. Process Sensor Data (`lambda-processing/`)
 
 - Receives MQTT messages from AWS IoT Core
-- Fetches NASA FIRMS wildfire data
-- Calculates risk score
-- Stores enriched data in DynamoDB
+- Fetches NASA FIRMS data (area API if `NASA_MAP_KEY` is set, else country CSV)
+- Risk + spread: **Cloud Run** when `CLOUD_RUN_PREDICT_URL` is set; otherwise rule-based fallback
+- Writes `riskScore`, **`riskLevel`**, **`spreadRateKmh`**, and related fields to DynamoDB
 
 #### 2. API Handler (`api-gateway-lambda/`)
 
@@ -40,6 +45,7 @@ API Gateway → Lambda (api_handler) ← Frontend Dashboard
 - `GET /api/sensors` - List all sensors
 - `GET /api/sensor/{id}` - Get sensor by ID
 - `GET /api/risk-map` - Get risk map data
+- `POST /api/ingest` - Local only: simulate IoT payload through `process_sensor_data` (creates DynamoDB rows with ML fields)
 
 ## Local Development
 
@@ -90,7 +96,47 @@ docker-compose down
 
 ## Testing
 
-### Test API Endpoints
+### Unit tests (enrichment / thresholds)
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install pytest
+.venv/bin/python -m pytest tests/ -v
+```
+
+### Test on AWS (real Lambda + DynamoDB, not Docker)
+
+Prerequisites: latest **`lambda-processing.zip`** / **`api-gateway-lambda.zip`** deployed (Terraform or console), processing Lambda env includes **`DYNAMODB_TABLE`**, optional **`CLOUD_RUN_PREDICT_URL`** and **`NASA_MAP_KEY`**.
+
+**A — Invoke processing Lambda directly** (fastest sanity check; same handler code as IoT):
+
+```bash
+export AWS_PROFILE=GreenGuard   # or your profile
+export AWS_REGION=us-east-1
+export PROCESS_LAMBDA_NAME=wildfire-process-sensor-data   # add -staging if needed
+chmod +x scripts/aws_invoke_process_lambda.sh
+./scripts/aws_invoke_process_lambda.sh
+```
+
+Then open **CloudWatch → Log group** for that function and confirm no errors; check **DynamoDB** for a new item for `TEST_DEVICE_ID`.
+
+**B — Publish over IoT Core** (full pipeline: MQTT → rule → Lambda):
+
+```bash
+export AWS_PROFILE=GreenGuard
+export AWS_REGION=us-east-1
+chmod +x scripts/aws_publish_iot_topic.sh
+./scripts/aws_publish_iot_topic.sh
+```
+
+Your IAM user/role must be allowed **`iot:Publish`** on the topic. Real devices use X.509 instead.
+
+**C — Confirm dashboard API** (API Gateway URL from Terraform output):
+
+```bash
+curl -s "https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/api/sensors"
+```
+
+### Test API Endpoints (local Docker)
 
 ```bash
 # Get all sensors
