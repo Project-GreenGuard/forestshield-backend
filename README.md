@@ -94,14 +94,7 @@ docker-compose logs -f
 docker-compose down
 ```
 
-## Testing
-
-### Automated tests (optional, local)
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install pytest
-.venv/bin/python -m pytest tests/ -q
-```
+## Verification
 
 ### After deploy (AWS)
 
