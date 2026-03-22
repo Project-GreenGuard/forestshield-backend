@@ -15,11 +15,9 @@ import requests
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any
-from gradio_client import Client
 
-HF_SPACE_ID = os.getenv("HF_SPACE_ID", "parvesam/forestshield-wildfire-risk")
 
-def call_hf_space_predict(
+def call_cloud_run_predict(
     temperature: float,
     humidity: float,
     lat: float,
@@ -27,50 +25,27 @@ def call_hf_space_predict(
     nearest_fire_dist,
     timestamp: str
 ):
-    """
-    Call the Hugging Face Gradio Space using gradio_client.
-    Returns (risk_score, risk_level, spread_rate_kmh).
-    """
-    try:
-        ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        month = ts.month
-        hour = ts.hour
-    except Exception:
-        now = datetime.utcnow()
-        month = now.month
-        hour = now.hour
+    url = "https://forestshield-ai-8285810750.us-central1.run.app/predict"
 
-    dist = float(nearest_fire_dist) if nearest_fire_dist is not None else 100.0
+    payload = {
+        "temperature": temperature,
+        "humidity": humidity,
+        "lat": lat,
+        "lng": lng,
+        "nearestFireDistance": nearest_fire_dist if nearest_fire_dist else 100.0,
+        "timestamp": timestamp
+    }
 
-    client = Client(HF_SPACE_ID)
+    response = requests.post(url, json=payload, timeout=5)
+    response.raise_for_status()
 
-    result = client.predict(
-        temperature=temperature,
-        humidity=humidity,
-        lat=lat,
-        lng=lng,
-        nearest_fire_dist=dist,
-        month=month,
-        hour=hour,
-        api_name="/predict",
+    data = response.json()
+
+    return (
+        data["risk_score"],
+        data["risk_level"],
+        data["spread_rate"]
     )
-
-    # result should be:
-    # [ "38.1 / 100", "🟠  MEDIUM", "6.1 km/h", "v..." ]
-
-    risk_score = float(str(result[0]).split("/")[0].strip())
-
-    raw_level = str(result[1]).upper()
-    if "HIGH" in raw_level:
-        risk_level = "HIGH"
-    elif "MEDIUM" in raw_level:
-        risk_level = "MEDIUM"
-    else:
-        risk_level = "LOW"
-
-    spread_rate_kmh = float(str(result[2]).replace("km/h", "").strip())
-
-    return risk_score, risk_level, spread_rate_kmh
 
 # Initialize AWS clients - support both local and AWS DynamoDB
 dynamodb_endpoint = os.getenv('AWS_ENDPOINT_URL')
@@ -121,7 +96,7 @@ def fetch_nasa_firms_data(country_code: str = "CAN") -> list:
         print("Warning: NASA_MAP_KEY not set. Skipping FIRMS fetch.")
         return []
     try:
-        url = NASA_FIRMS_API.format(key=api_key, bbox=_ONTARIO_BBOX)
+        url = NASA_FIRMS_API.format(map_key=api_key, bbox=_ONTARIO_BBOX)
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         
@@ -290,15 +265,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         fire_distance = fire_info.get('distance')
         print(f"Nearest fire distance: {fire_distance} km")
         
-        # Calculate risk score — call HF Space API, fall back to rule-based if unavailable
-        print("Calculating risk score via HF Space...")
+        # Calculate risk score — call Cloud Run API, fall back to rule-based if unavailable
+        print("Calculating risk score via Cloud Run...")
         try:
-            risk_score, risk_level, spread_rate_kmh = call_hf_space_predict(
+            risk_score, risk_level, spread_rate_kmh = call_cloud_run_predict(
                 temperature, humidity, lat, lng, fire_distance, timestamp
             )
-            print(f"HF Space prediction: {risk_score} ({risk_level}), spread: {spread_rate_kmh} km/h")
-        except Exception as hf_err:
-            print(f"[WARN] HF Space unavailable, using rule-based fallback: {hf_err}")
+            print(f"Cloud Run prediction: {risk_score} ({risk_level}), spread: {spread_rate_kmh} km/h")
+        except Exception as cloud_run_err:
+            print(f"[WARN] Cloud Run unavailable, using rule-based fallback: {cloud_run_err}")
             risk_score = calculate_risk_score(temperature, humidity, fire_distance)
             risk_level = 'HIGH' if risk_score > 60 else ('MEDIUM' if risk_score > 30 else 'LOW')
             spread_rate_kmh = estimate_spread_rate(temperature, humidity, risk_score)
