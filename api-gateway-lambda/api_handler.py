@@ -5,6 +5,7 @@ Endpoints:
 - GET /api/sensors - List all sensors
 - GET /api/sensor/{id} - Get sensor by ID
 - GET /api/risk-map - Get risk map data
+- GET /api/nasa-fires - NASA FIRMS hotspots (needs NASA_MAP_KEY on this Lambda)
 """
 
 import json
