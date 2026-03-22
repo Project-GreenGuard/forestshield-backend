@@ -96,47 +96,22 @@ docker-compose down
 
 ## Testing
 
-### Unit tests (enrichment / thresholds)
+### Automated tests (optional, local)
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install pytest
-.venv/bin/python -m pytest tests/ -v
+.venv/bin/python -m pytest tests/ -q
 ```
 
-### Test on AWS (real Lambda + DynamoDB, not Docker)
+### After deploy (AWS)
 
-Prerequisites: latest **`lambda-processing.zip`** / **`api-gateway-lambda.zip`** deployed (Terraform or console), processing Lambda env includes **`DYNAMODB_TABLE`**, optional **`CLOUD_RUN_PREDICT_URL`** and **`NASA_MAP_KEY`**.
-
-**A — Invoke processing Lambda directly** (fastest sanity check; same handler code as IoT):
-
-```bash
-export AWS_PROFILE=GreenGuard   # or your profile
-export AWS_REGION=us-east-1
-export PROCESS_LAMBDA_NAME=wildfire-process-sensor-data   # add -staging if needed
-chmod +x scripts/aws_invoke_process_lambda.sh
-./scripts/aws_invoke_process_lambda.sh
-```
-
-Then open **CloudWatch → Log group** for that function and confirm no errors; check **DynamoDB** for a new item for `TEST_DEVICE_ID`.
-
-**B — Publish over IoT Core** (full pipeline: MQTT → rule → Lambda):
-
-```bash
-export AWS_PROFILE=GreenGuard
-export AWS_REGION=us-east-1
-chmod +x scripts/aws_publish_iot_topic.sh
-./scripts/aws_publish_iot_topic.sh
-```
-
-Your IAM user/role must be allowed **`iot:Publish`** on the topic. Real devices use X.509 instead.
-
-**C — Confirm dashboard API** (API Gateway URL from Terraform output):
+Confirm **`lambda-processing.zip`** / **`api-gateway-lambda.zip`** are current and Lambda env includes **`DYNAMODB_TABLE`**, optional **`CLOUD_RUN_PREDICT_URL`** and **`NASA_MAP_KEY`**. Check **CloudWatch** logs for the Lambdas and hit the public API, for example:
 
 ```bash
 curl -s "https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/api/sensors"
 ```
 
-### Test API Endpoints (local Docker)
+### Local Docker API
 
 ```bash
 # Get all sensors
