@@ -149,7 +149,6 @@ def estimate_spread_rate_kmh(temperature: float, humidity: float, risk_score: fl
     raw = 12.0 * (0.35 * temp_factor + 0.35 * humidity_factor + 0.30 * risk_factor)
     return round(min(max(raw, 0.5), 12.0), 2)
 
-
 def call_cloud_run_predict(
     temperature: float,
     humidity: float,
@@ -157,10 +156,16 @@ def call_cloud_run_predict(
     lng: float,
     nearest_fire_dist: Optional[float],
     timestamp: str,
-) -> Tuple[float, str, float]:
+) -> Dict[str, Any]:
     """
-    POST to Cloud Run predict endpoint. Response keys: risk_score, risk_level, spread_rate
-    (snake_case) or camelCase equivalents.
+    POST to Cloud Run predict endpoint.
+    Expected response keys:
+      - risk_score / riskScore
+      - risk_level / riskLevel
+      - spread_rate / spreadRateKmh
+      - risk_factors
+      - recommended_action
+      - explanation
     """
     if not CLOUD_RUN_PREDICT_URL:
         raise RuntimeError("CLOUD_RUN_PREDICT_URL not set")
@@ -195,7 +200,14 @@ def call_cloud_run_predict(
     if level not in ("LOW", "MEDIUM", "HIGH"):
         level = risk_level_from_score(score)
 
-    return score, level, spread
+    return {
+        "risk_score": score,
+        "risk_level": level,
+        "spread_rate_kmh": spread,
+        "risk_factors": data.get("risk_factors", []),
+        "recommended_action": data.get("recommended_action"),
+        "explanation": data.get("explanation"),
+    }
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -240,19 +252,34 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         fire_info = find_nearest_fire(lat, lng, fires)
         fire_distance = fire_info.get("distance")
+        #fire_distance = 2.0  # force nearby fire for demo
         print(f"Nearest fire distance: {fire_distance} km")
 
         risk_score: float
         risk_level: str
         spread_rate_kmh: float
+        risk_factors = []
+        recommended_action = None
+        explanation = None
 
         if CLOUD_RUN_PREDICT_URL:
             print(f"Calling Cloud Run: {CLOUD_RUN_PREDICT_URL}")
             try:
-                risk_score, risk_level, spread_rate_kmh = call_cloud_run_predict(
+                prediction = call_cloud_run_predict(
                     temperature, humidity, lat, lng, fire_distance, timestamp
                 )
-                print(f"Cloud Run: score={risk_score}, level={risk_level}, spread={spread_rate_kmh}")
+
+                risk_score = prediction["risk_score"]
+                risk_level = prediction["risk_level"]
+                spread_rate_kmh = prediction["spread_rate_kmh"]
+                risk_factors = prediction.get("risk_factors", [])
+                recommended_action = prediction.get("recommended_action")
+                explanation = prediction.get("explanation")
+
+                print(
+                    f"Cloud Run: score={risk_score}, level={risk_level}, "
+                    f"spread={spread_rate_kmh}, factors={risk_factors}"
+                )
             except Exception as err:
                 print(f"[WARN] Cloud Run unavailable, rule-based fallback: {err}")
                 risk_score = calculate_risk_score(temperature, humidity, fire_distance)
@@ -276,6 +303,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "spreadRateKmh": Decimal(str(spread_rate_kmh)),
             "nearestFireDistance": Decimal(str(fire_distance)) if fire_distance else Decimal("-1"),
             "nearestFireData": json.dumps(fire_info.get("fire_data")) if fire_info.get("fire_data") else None,
+            "riskFactors": risk_factors if risk_factors else None,
+            "recommendedAction": recommended_action,
+            "explanation": explanation,
             "ttl": int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60),
         }
 
@@ -293,6 +323,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     "riskLevel": risk_level,
                     "spreadRateKmh": spread_rate_kmh,
                     "fireDistance": fire_distance,
+                    "riskFactors": risk_factors,
+                    "recommendedAction": recommended_action,
+                    "explanation": explanation,
                 }
             ),
         }
