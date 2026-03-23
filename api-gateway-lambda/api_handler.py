@@ -92,6 +92,9 @@ def get_all_sensors():
                     'timestamp': timestamp,
                     'riskLevel': item.get('riskLevel'),
                     'spreadRateKmh': _f(item.get('spreadRateKmh'), None) if item.get('spreadRateKmh') is not None else None,
+                    'riskFactors': item.get('riskFactors'),
+                    'recommendedAction': item.get('recommendedAction'),
+                    'explanation': item.get('explanation'),
                 }
 
         return [merge_sensor_public_fields(s) for s in sensors.values()]
@@ -170,6 +173,9 @@ def get_risk_map_data():
                 'timestamp': item.get('timestamp'),
                 'riskLevel': item.get('riskLevel'),
                 'spreadRateKmh': _f(item.get('spreadRateKmh'), None) if item.get('spreadRateKmh') is not None else None,
+                'riskFactors': item.get('riskFactors'),
+                'recommendedAction': item.get('recommendedAction'),
+                'explanation': item.get('explanation'),
             }
             map_data.append(merge_sensor_public_fields(row))
 
