@@ -79,6 +79,9 @@ def get_all_sensors():
                     'riskLevel': item.get('riskLevel', 'UNKNOWN'),
                     'spreadRateKmh': float(item.get('spreadRateKmh', 0)) if isinstance(item.get('spreadRateKmh'), Decimal) else item.get('spreadRateKmh'),
                     'nearestFireDistance': float(item.get('nearestFireDistance', -1)) if isinstance(item.get('nearestFireDistance'), Decimal) else item.get('nearestFireDistance'),
+                    'riskFactors': item.get('riskFactors', []),
+                    'recommendedAction': item.get('recommendedAction', ''),
+                    'explanation': item.get('explanation', ''),
                     'timestamp': timestamp
                 }
         

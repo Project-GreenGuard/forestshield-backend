@@ -44,7 +44,10 @@ def call_cloud_run_predict(
     return (
         data["risk_score"],
         data["risk_level"],
-        data["spread_rate"]
+        data["spread_rate"],
+        data.get("risk_factors", []),
+        data.get("recommended_action", ""),
+        data.get("explanation", ""),
     )
 
 # Initialize AWS clients - support both local and AWS DynamoDB
@@ -267,8 +270,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         # Calculate risk score — call Cloud Run API, fall back to rule-based if unavailable
         print("Calculating risk score via Cloud Run...")
+        risk_factors = []
+        recommended_action = ""
+        explanation = ""
         try:
-            risk_score, risk_level, spread_rate_kmh = call_cloud_run_predict(
+            risk_score, risk_level, spread_rate_kmh, risk_factors, recommended_action, explanation = call_cloud_run_predict(
                 temperature, humidity, lat, lng, fire_distance, timestamp
             )
             print(f"Cloud Run prediction: {risk_score} ({risk_level}), spread: {spread_rate_kmh} km/h")
@@ -277,6 +283,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             risk_score = calculate_risk_score(temperature, humidity, fire_distance)
             risk_level = 'HIGH' if risk_score > 60 else ('MEDIUM' if risk_score > 30 else 'LOW')
             spread_rate_kmh = estimate_spread_rate(temperature, humidity, risk_score)
+            risk_factors = []
+            recommended_action = "Fallback mode — monitor conditions manually."
+            explanation = f"Rule-based risk estimate: {risk_level} ({risk_score}/100)."
             print(f"Rule-based risk score: {risk_score} ({risk_level})")
 
         print(f"Estimated spread rate: {spread_rate_kmh} km/h")
@@ -295,6 +304,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'spreadRateKmh': Decimal(str(spread_rate_kmh)),
             'nearestFireDistance': Decimal(str(fire_distance)) if fire_distance else Decimal('-1'),
             'nearestFireData': json.dumps(fire_info.get('fire_data')) if fire_info.get('fire_data') else None,
+            'riskFactors': risk_factors if risk_factors else [],
+            'recommendedAction': recommended_action or '',
+            'explanation': explanation or '',
             'ttl': int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
         }
         
