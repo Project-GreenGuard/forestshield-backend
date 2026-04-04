@@ -150,6 +150,47 @@ def estimate_spread_rate_kmh(temperature: float, humidity: float, risk_score: fl
     return round(min(max(raw, 0.5), 12.0), 2)
 
 
+def generate_ai_insights(temperature, humidity, fire_distance, risk_score):
+    """
+    Generate AI-style decision-support insights based on sensor features
+    and predicted risk score. Mirrors forestshield-ai/inference/predict.py.
+    """
+    reasons = []
+
+    if temperature >= 35:
+        reasons.append("high temperature")
+    elif temperature >= 28:
+        reasons.append("elevated temperature")
+
+    if humidity <= 30:
+        reasons.append("very low humidity")
+    elif humidity <= 60:
+        reasons.append("moderate humidity")
+    else:
+        reasons.append("higher humidity conditions")
+
+    if fire_distance is not None and fire_distance <= 10:
+        reasons.append("active fire detected nearby")
+    elif fire_distance is not None and fire_distance <= 50:
+        reasons.append("fire activity within operational range")
+
+    if risk_score >= 75:
+        reasons.append("strong model confidence in severe wildfire conditions")
+    elif risk_score >= 45 and len(reasons) <= 2:
+        reasons.append("moderate environmental risk conditions")
+
+    if risk_score >= 61:
+        action = "Dispatch emergency responders, monitor evacuation zones, and issue high-priority alerts."
+    elif risk_score >= 31:
+        action = "Increase monitoring, prepare response teams, and watch for changing fire conditions."
+    else:
+        action = "Maintain routine monitoring and continue collecting sensor updates."
+
+    explanation = f"Predicted wildfire risk is driven by {', '.join(reasons)}." if reasons else "Insufficient data for detailed analysis."
+
+    return reasons, action, explanation
+
+
 def call_cloud_run_predict(
     temperature: float,
     humidity: float,
@@ -157,10 +198,10 @@ def call_cloud_run_predict(
     lng: float,
     nearest_fire_dist: Optional[float],
     timestamp: str,
-) -> Tuple[float, str, float]:
+) -> Tuple[float, str, float, list, str, str]:
     """
-    POST to Cloud Run predict endpoint. Response keys: risk_score, risk_level, spread_rate
-    (snake_case) or camelCase equivalents.
+    POST to Cloud Run predict endpoint. Returns:
+    (risk_score, risk_level, spread_rate, risk_factors, recommended_action, explanation)
     """
     if not CLOUD_RUN_PREDICT_URL:
         raise RuntimeError("CLOUD_RUN_PREDICT_URL not set")
@@ -195,7 +236,12 @@ def call_cloud_run_predict(
     if level not in ("LOW", "MEDIUM", "HIGH"):
         level = risk_level_from_score(score)
 
-    return score, level, spread
+    # Extract new AI insight fields returned by predict.py
+    risk_factors = data.get("risk_factors", data.get("riskFactors", []))
+    recommended_action = data.get("recommended_action", data.get("recommendedAction", ""))
+    explanation = data.get("explanation", "")
+
+    return score, level, spread, risk_factors, recommended_action, explanation
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -246,23 +292,34 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         risk_level: str
         spread_rate_kmh: float
 
+        risk_factors = []
+        recommended_action = ""
+        explanation = ""
+        used_cloud_run = False
+
         if CLOUD_RUN_PREDICT_URL:
             print(f"Calling Cloud Run: {CLOUD_RUN_PREDICT_URL}")
             try:
-                risk_score, risk_level, spread_rate_kmh = call_cloud_run_predict(
+                risk_score, risk_level, spread_rate_kmh, risk_factors, recommended_action, explanation = call_cloud_run_predict(
                     temperature, humidity, lat, lng, fire_distance, timestamp
                 )
+                used_cloud_run = True
                 print(f"Cloud Run: score={risk_score}, level={risk_level}, spread={spread_rate_kmh}")
+                print(f"Cloud Run AI: factors={risk_factors}, action={recommended_action[:50]}...")
             except Exception as err:
                 print(f"[WARN] Cloud Run unavailable, rule-based fallback: {err}")
-                risk_score = calculate_risk_score(temperature, humidity, fire_distance)
-                risk_level = risk_level_from_score(risk_score)
-                spread_rate_kmh = estimate_spread_rate_kmh(temperature, humidity, risk_score)
-        else:
-            print("CLOUD_RUN_PREDICT_URL unset; using rule-based scoring only")
+
+        if not used_cloud_run:
+            if not CLOUD_RUN_PREDICT_URL:
+                print("CLOUD_RUN_PREDICT_URL unset; using rule-based scoring only")
             risk_score = calculate_risk_score(temperature, humidity, fire_distance)
             risk_level = risk_level_from_score(risk_score)
             spread_rate_kmh = estimate_spread_rate_kmh(temperature, humidity, risk_score)
+            risk_factors, recommended_action, explanation = generate_ai_insights(
+                temperature, humidity, fire_distance, risk_score
+            )
+
+        print(f"AI Insights: factors={risk_factors}, action={recommended_action[:50]}...")
 
         dynamodb_item = {
             "deviceId": device_id,
@@ -276,6 +333,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "spreadRateKmh": Decimal(str(spread_rate_kmh)),
             "nearestFireDistance": Decimal(str(fire_distance)) if fire_distance else Decimal("-1"),
             "nearestFireData": json.dumps(fire_info.get("fire_data")) if fire_info.get("fire_data") else None,
+            "riskFactors": risk_factors,
+            "recommendedAction": recommended_action,
+            "explanation": explanation,
             "ttl": int(datetime.utcnow().timestamp()) + (30 * 24 * 60 * 60),
         }
 
@@ -293,6 +353,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     "riskLevel": risk_level,
                     "spreadRateKmh": spread_rate_kmh,
                     "fireDistance": fire_distance,
+                    "riskFactors": risk_factors,
+                    "recommendedAction": recommended_action,
+                    "explanation": explanation,
                 }
             ),
         }
