@@ -34,7 +34,7 @@ table = dynamodb.Table(os.getenv("DYNAMODB_TABLE", "WildfireSensorData"))
 # NASA FIRMS: area API needs MAP key; country CSV works without (broader bbox)
 NASA_FIRMS_AREA = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/MODIS_NRT/{bbox}/1"
 NASA_FIRMS_COUNTRY = "https://firms.modaps.eosdis.nasa.gov/api/country/csv/{}/MODIS_NRT/1"
-_ONTARIO_BBOX = "-95.5,41.5,-74.0,56.9"
+_CANADA_BBOX = "-141.0,41.5,-52.6,83.5"
 
 # Full URL to POST JSON (e.g. https://your-service.run.app/predict). If unset, rule-based only.
 CLOUD_RUN_PREDICT_URL = os.getenv("CLOUD_RUN_PREDICT_URL", "").strip()
@@ -64,7 +64,7 @@ def fetch_nasa_firms_data(country_code: str = "CAN") -> list:
     api_key = os.getenv("NASA_MAP_KEY", "").strip()
     if api_key:
         try:
-            url = NASA_FIRMS_AREA.format(map_key=api_key, bbox=_ONTARIO_BBOX)
+            url = NASA_FIRMS_AREA.format(map_key=api_key, bbox=_CANADA_BBOX)
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             return _parse_firms_csv(response.text)
