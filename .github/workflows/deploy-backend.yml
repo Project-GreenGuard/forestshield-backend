@@ -109,8 +109,8 @@ jobs:
             else
               terraform workspace select default || terraform workspace new default || true
             fi
-            PROCESSING_NAME=$(terraform output -raw lambda_processing_function 2>/dev/null || echo "")
-            API_NAME=$(terraform output -raw lambda_api_function 2>/dev/null || echo "")
+            PROCESSING_NAME=$(terraform output -raw lambda_processing_function 2>/dev/null) || PROCESSING_NAME=""
+            API_NAME=$(terraform output -raw lambda_api_function 2>/dev/null) || API_NAME=""
             cd ..
           fi
           
