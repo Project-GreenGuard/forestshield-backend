@@ -15,7 +15,7 @@ def get_nasa_fires():
         print("Warning: NASA_MAP_KEY not set. Returning empty fire data.")
         return []
 
-    bbox = "-95.5,41.5,-74.0,56.9"
+    bbox = "-83.5,41.5,-74.5,45.5"
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/VIIRS_SNPP_NRT/{bbox}/1"
 
     try:
