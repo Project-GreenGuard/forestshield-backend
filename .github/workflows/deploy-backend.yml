@@ -90,10 +90,11 @@ jobs:
           else
             terraform workspace select default || terraform workspace new default || true
           fi
-          if terraform output -raw api_endpoint 2>/dev/null; then
-            echo "api_endpoint=$(terraform output -raw api_endpoint)" >> $GITHUB_OUTPUT
-          else
+          API_OUT=$(terraform output -raw api_endpoint 2>/dev/null)
+          if [[ "$API_OUT" == *"Warning:"* ]] || [ -z "$API_OUT" ]; then
             echo "api_endpoint=${{ secrets.PRODUCTION_API_URL || secrets.STAGING_API_URL }}" >> $GITHUB_OUTPUT
+          else
+            echo "api_endpoint=$API_OUT" >> $GITHUB_OUTPUT
           fi
 
       - name: Get Lambda Function Names
@@ -109,8 +110,10 @@ jobs:
             else
               terraform workspace select default || terraform workspace new default || true
             fi
-            PROCESSING_NAME=$(terraform output -raw lambda_processing_function 2>/dev/null) || PROCESSING_NAME=""
-            API_NAME=$(terraform output -raw lambda_api_function 2>/dev/null) || API_NAME=""
+            PROCESSING_NAME=$(terraform output -raw lambda_processing_function 2>/dev/null)
+            if [[ "$PROCESSING_NAME" == *"Warning:"* ]]; then PROCESSING_NAME=""; fi
+            API_NAME=$(terraform output -raw lambda_api_function 2>/dev/null)
+            if [[ "$API_NAME" == *"Warning:"* ]]; then API_NAME=""; fi
             cd ..
           fi
           
