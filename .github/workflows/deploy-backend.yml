@@ -20,7 +20,6 @@ jobs:
   deploy:
     name: Deploy Backend
     runs-on: ubuntu-latest
-    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
     
     steps:
       - name: Checkout code
