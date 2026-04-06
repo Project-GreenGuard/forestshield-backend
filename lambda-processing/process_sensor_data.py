@@ -331,7 +331,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "riskScore": Decimal(str(risk_score)),
             "riskLevel": risk_level,
             "spreadRateKmh": Decimal(str(spread_rate_kmh)),
-            "nearestFireDistance": Decimal(str(fire_distance)) if fire_distance else Decimal("-1"),
+            "nearestFireDistance": Decimal(str(fire_distance)) if fire_distance is not None else Decimal("-1"),
             "nearestFireData": json.dumps(fire_info.get("fire_data")) if fire_info.get("fire_data") else None,
             "riskFactors": risk_factors,
             "recommendedAction": recommended_action,
